@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <stdint.h>
+#include <endian.h>
 
 namespace bcinfo {
 
@@ -131,19 +132,19 @@ static inline size_t writeAndroidBitcodeWrapper(AndroidBitcodeWrapper *wrapper,
     return 0;
   }
 
-  wrapper->Magic = 0x0B17C0DE;
-  wrapper->Version = 0;
-  wrapper->BitcodeOffset = sizeof(*wrapper);
-  wrapper->BitcodeSize = bitcodeSize;
-  wrapper->HeaderVersion = 0;
-  wrapper->TargetAPI = targetAPI;
-  wrapper->PNaClVersion = 0;
-  wrapper->CompilerVersionTag = BCHeaderField::kAndroidCompilerVersion;
-  wrapper->CompilerVersionLen = 4;
-  wrapper->CompilerVersion = compilerVersion;
-  wrapper->OptimizationLevelTag = BCHeaderField::kAndroidOptimizationLevel;
-  wrapper->OptimizationLevelLen = 4;
-  wrapper->OptimizationLevel = optimizationLevel;
+  wrapper->Magic = htole32(0x0B17C0DE);
+  wrapper->Version = htole32(0);
+  wrapper->BitcodeOffset = htole32(sizeof(*wrapper));
+  wrapper->BitcodeSize = htole32(bitcodeSize);
+  wrapper->HeaderVersion = htole32(0);
+  wrapper->TargetAPI = htole32(targetAPI);
+  wrapper->PNaClVersion = htole32(0);
+  wrapper->CompilerVersionTag = htole16(BCHeaderField::kAndroidCompilerVersion);
+  wrapper->CompilerVersionLen = htole16(4);
+  wrapper->CompilerVersion = htole32(compilerVersion);
+  wrapper->OptimizationLevelTag = htole16(BCHeaderField::kAndroidOptimizationLevel);
+  wrapper->OptimizationLevelLen = htole16(4);
+  wrapper->OptimizationLevel = htole32(optimizationLevel);
 
   return sizeof(*wrapper);
 }
