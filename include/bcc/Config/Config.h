@@ -53,6 +53,8 @@
     #define DEFAULT_X86_CODEGEN
   #elif defined(__x86_64__)
     #define DEFAULT_X86_64_CODEGEN
+  #else
+    #define DEFAULT_ARM_CODEGEN
   #endif
 #endif
 
