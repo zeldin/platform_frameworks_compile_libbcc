@@ -89,6 +89,8 @@ include $(BUILD_SHARED_LIBRARY)
 # Device Shared Library libbcc
 #=====================================================================
 
+ifneq (,)  # skip device variant to avoid contaminating REQUIRED_MODULES
+
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := libbcc
@@ -142,6 +144,8 @@ include $(LIBBCC_ROOT_PATH)/libbcc-gen-build-info.mk
 
 include $(LIBBCC_DEVICE_BUILD_MK)
 include $(BUILD_SHARED_LIBRARY)
+
+endif
 
 #=====================================================================
 # Host Shared Library libbcc
