@@ -22,28 +22,30 @@
 #include "bcc/ExecutionEngine/SymbolResolverProxy.h"
 #include "bcc/Renderscript/RSInfo.h"
 #include "bcc/Renderscript/RSCompiler.h"
+#include "bcc/Renderscript/RSScript.h"
 
 namespace bcc {
 
 class BCCContext;
 class CompilerConfig;
+class RSCompilerDriver;
 class RSExecutable;
-class RSScript;
+
+// Type signature for dynamically loaded initialization of an RSCompilerDriver.
+typedef void (*RSCompilerDriverInit_t) (bcc::RSCompilerDriver *);
+// Name of the function that we attempt to dynamically load/execute.
+#define RS_COMPILER_DRIVER_INIT_FN rsCompilerDriverInit
 
 class RSCompilerDriver {
 private:
   CompilerConfig *mConfig;
   RSCompiler mCompiler;
 
-  CompilerRTSymbolResolver *mCompilerRuntime;
-  LookupFunctionSymbolResolver<void*> mRSRuntime;
-  SymbolResolverProxy mResolver;
-
   // Are we compiling under an RS debug context with additional checks?
   bool mDebugContext;
 
-  RSExecutable *loadScriptCache(const char *pOutputPath,
-                                const RSInfo::DependencyTableTy &pDeps);
+  // Callback before linking with the runtime library.
+  RSLinkRuntimeCallback mLinkRuntimeCallback;
 
   // Do we merge global variables on ARM using LLVM's optimization pass?
   // Disabling LLVM's global merge pass allows static globals to be correctly
@@ -56,22 +58,20 @@ private:
   // been changed and false if it remains unchanged.
   bool setupConfig(const RSScript &pScript);
 
-  RSExecutable *compileScript(RSScript &pScript,
-                              const char* pScriptName,
-                              const char *pOutputPath,
-                              const char *pRuntimePath,
-                              const RSInfo::DependencyTableTy &pDeps,
-                              bool pSkipLoad);
+  // Compiles the provided bitcode, placing the binary at pOutputPath.
+  // - If saveInfoFile is true, it also stores the RSInfo data in a file with a path derived from
+  //   pOutputPath.
+  // - pSourceHash and commandLineToEmbed are values to embed in the RSInfo for future cache
+  //   invalidation decision.
+  // - If pDumpIR is true, a ".ll" file will also be created.
+  Compiler::ErrorCode compileScript(RSScript& pScript, const char* pScriptName,
+                                    const char* pOutputPath, const char* pRuntimePath,
+                                    const RSInfo::DependencyHashTy& pSourceHash,
+                                    const char* commandLineToEmbed, bool saveInfoFile, bool pDumpIR);
 
 public:
   RSCompilerDriver(bool pUseCompilerRT = true);
   ~RSCompilerDriver();
-
-  inline void setRSRuntimeLookupFunction(
-      LookupFunctionSymbolResolver<>::LookupFunctionTy pLookupFunc)
-  { mRSRuntime.setLookupFunction(pLookupFunc); }
-  inline void setRSRuntimeLookupContext(void *pContext)
-  { mRSRuntime.setContext(pContext); }
 
   RSCompiler *getCompiler() {
     return &mCompiler;
@@ -85,6 +85,14 @@ public:
     mDebugContext = v;
   }
 
+  void setLinkRuntimeCallback(RSLinkRuntimeCallback c) {
+    mLinkRuntimeCallback = c;
+  }
+
+  RSLinkRuntimeCallback getLinkRuntimeCallback() const {
+    return mLinkRuntimeCallback;
+  }
+
   // This function enables/disables merging of global static variables.
   // Note that it only takes effect on ARM architectures (other architectures
   // do not offer this option).
@@ -96,16 +104,25 @@ public:
     return mEnableGlobalMerge;
   }
 
-  // FIXME: This method accompany with loadScriptCache and compileScript should
+  // FIXME: This method accompany with loadScript and compileScript should
   //        all be const-methods. They're not now because the getAddress() in
   //        SymbolResolverInterface is not a const-method.
-  RSExecutable *build(BCCContext &pContext,
-                      const char *pCacheDir, const char *pResName,
-                      const char *pBitcode, size_t pBitcodeSize,
-                      const char *pRuntimePath,
-                      RSLinkRuntimeCallback pLinkRuntimeCallback = NULL);
-  RSExecutable *build(RSScript &pScript, const char *pOut,
-                      const char *pRuntimePath);
+  // Returns true if script is successfully compiled.
+  bool build(BCCContext& pContext, const char* pCacheDir, const char* pResName,
+             const char* pBitcode, size_t pBitcodeSize, const char* commandLine,
+             const char* pRuntimePath,
+             RSLinkRuntimeCallback pLinkRuntimeCallback = nullptr,
+             bool pDumpIR = false);
+
+  // Returns true if script is successfully compiled.
+  bool buildForCompatLib(RSScript &pScript, const char *pOut, const char *pRuntimePath);
+
+  // Tries to load the the compiled bit code at pCacheDir of the given name.
+  // It checks that the file has been compiled from the same bit code and with
+  // the same compile arguments as provided.
+  static RSExecutable* loadScript(const char* pCacheDir, const char* pResName, const char* pBitcode,
+                                  size_t pBitcodeSize, const char* expectedCompileCommandLine,
+                                  SymbolResolverProxy& pResolver);
 };
 
 } // end namespace bcc

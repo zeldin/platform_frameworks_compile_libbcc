@@ -21,10 +21,11 @@
 #include "BitReader_2_7/BitReader_2_7.h"
 #include "BitReader_3_0/BitReader_3_0.h"
 
+#include "BitWriter_3_2/ReaderWriter_3_2.h"
+
 #define LOG_TAG "bcinfo"
 #include <cutils/log.h>
 
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/Bitcode/BitstreamWriter.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/LLVMContext.h"
@@ -33,6 +34,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
+#include <climits>
 
 namespace bcinfo {
 
@@ -52,9 +54,10 @@ namespace bcinfo {
  * LLVM 3.1
  *  16 - Ice Cream Sandwich MR2
  */
-static const unsigned int kMinimumAPIVersion = 11;
-static const unsigned int kMaximumAPIVersion = BCINFO_API_VERSION;
-static const unsigned int kCurrentAPIVersion = 10000;
+static const unsigned int kMinimumAPIVersion     = 11;
+static const unsigned int kMaximumAPIVersion     = RS_VERSION;
+static const unsigned int kCurrentAPIVersion     = 10000;
+static const unsigned int kDevelopmentAPIVersion = UINT_MAX;
 
 /**
  * The minimum version which does not require translation (i.e. is already
@@ -67,7 +70,7 @@ static const unsigned int kMinimumCompatibleVersion_LLVM_2_7 = 11;
 
 BitcodeTranslator::BitcodeTranslator(const char *bitcode, size_t bitcodeSize,
                                      unsigned int version)
-    : mBitcode(bitcode), mBitcodeSize(bitcodeSize), mTranslatedBitcode(NULL),
+    : mBitcode(bitcode), mBitcodeSize(bitcodeSize), mTranslatedBitcode(nullptr),
       mTranslatedBitcodeSize(0), mVersion(version) {
   return;
 }
@@ -79,7 +82,7 @@ BitcodeTranslator::~BitcodeTranslator() {
     // the bitcode would be improper.
     delete [] mTranslatedBitcode;
   }
-  mTranslatedBitcode = NULL;
+  mTranslatedBitcode = nullptr;
   return;
 }
 
@@ -96,9 +99,10 @@ bool BitcodeTranslator::translate() {
           BCWrapper.getTargetAPI(), mVersion);
   }
 
-  if ((mVersion != kCurrentAPIVersion) &&
-      ((mVersion < kMinimumAPIVersion) ||
-       (mVersion > kMaximumAPIVersion))) {
+  if ((mVersion != kDevelopmentAPIVersion) &&
+      (mVersion != kCurrentAPIVersion)     &&
+       ((mVersion < kMinimumAPIVersion) ||
+        (mVersion > kMaximumAPIVersion))) {
     ALOGE("Invalid API version: %u is out of range ('%u' - '%u')", mVersion,
          kMinimumAPIVersion, kMaximumAPIVersion);
     return false;
@@ -114,14 +118,14 @@ bool BitcodeTranslator::translate() {
 
   // Do the actual transcoding by invoking a 2.7-era bitcode reader that can
   // then write the bitcode back out in a more modern (acceptable) version.
-  llvm::OwningPtr<llvm::LLVMContext> mContext(new llvm::LLVMContext());
-  llvm::OwningPtr<llvm::MemoryBuffer> MEM(
+  std::unique_ptr<llvm::LLVMContext> mContext(new llvm::LLVMContext());
+  std::unique_ptr<llvm::MemoryBuffer> MEM(
     llvm::MemoryBuffer::getMemBuffer(
       llvm::StringRef(mBitcode, mBitcodeSize), "", false));
   std::string error;
 
   // Module ownership is handled by the context, so we don't need to free it.
-  llvm::Module *module = NULL;
+  llvm::Module *module = nullptr;
 
   if (mVersion >= kMinimumCompatibleVersion_LLVM_3_0) {
     module = llvm_3_0::ParseBitcodeFile(MEM.get(), *mContext, &error);
@@ -141,7 +145,8 @@ bool BitcodeTranslator::translate() {
   std::string Buffer;
 
   llvm::raw_string_ostream OS(Buffer);
-  llvm::WriteBitcodeToFile(module, OS);
+  // Use the LLVM 3.2 bitcode writer, instead of the top-of-tree version.
+  llvm_3_2::WriteBitcodeToFile(module, OS);
   OS.flush();
 
   AndroidBitcodeWrapper wrapper;
@@ -164,4 +169,3 @@ bool BitcodeTranslator::translate() {
 }
 
 }  // namespace bcinfo
-

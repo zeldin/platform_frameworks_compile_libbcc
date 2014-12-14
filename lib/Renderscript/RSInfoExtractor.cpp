@@ -54,7 +54,7 @@ const llvm::StringRef export_foreach_metadata_name("#rs_export_foreach");
 const llvm::StringRef object_slot_metadata_name("#rs_object_slots");
 
 inline llvm::StringRef getStringFromOperand(const llvm::Value *pString) {
-  if ((pString != NULL) && (pString->getValueID() == llvm::Value::MDStringVal)) {
+  if ((pString != nullptr) && (pString->getValueID() == llvm::Value::MDStringVal)) {
     return static_cast<const llvm::MDString *>(pString)->getString();
   }
   return llvm::StringRef();
@@ -62,14 +62,14 @@ inline llvm::StringRef getStringFromOperand(const llvm::Value *pString) {
 
 template<size_t NumOperands>
 inline size_t getMetadataStringLength(const llvm::NamedMDNode *pMetadata) {
-  if (pMetadata == NULL) {
+  if (pMetadata == nullptr) {
     return 0;
   }
 
   size_t string_size = 0;
   for (unsigned i = 0, e = pMetadata->getNumOperands(); i < e; i++) {
     llvm::MDNode *node = pMetadata->getOperand(i);
-    if ((node != NULL) && (node->getNumOperands() >= NumOperands)) {
+    if ((node != nullptr) && (node->getNumOperands() >= NumOperands)) {
       // Compiler try its best to unroll this loop since NumOperands is a
       // template parameter (therefore the number of iteration can be determined
       // at compile-time and it's usually small.)
@@ -88,6 +88,7 @@ inline size_t getMetadataStringLength(const llvm::NamedMDNode *pMetadata) {
 
 // Write a string pString to the string pool pStringPool at offset pWriteStart.
 // Return the pointer the pString resides within the string pool.
+// Updates pWriteStart to the next available spot.
 const char *writeString(const llvm::StringRef &pString, char *pStringPool,
                         off_t *pWriteStart) {
   if (pString.empty()) {
@@ -105,29 +106,11 @@ const char *writeString(const llvm::StringRef &pString, char *pStringPool,
   return pStringWriteStart;
 }
 
-bool writeDependency(const std::string &pSourceName, const uint8_t *pSHA1,
-                     char *pStringPool, off_t *pWriteStart,
-                     RSInfo::DependencyTableTy &pDepTable) {
-  const char *source_name = writeString(pSourceName, pStringPool, pWriteStart);
-
-  uint8_t *sha1 = reinterpret_cast<uint8_t *>(pStringPool + *pWriteStart);
-
-  // SHA-1 is special. It's size of SHA1_DIGEST_LENGTH (=20) bytes long without
-  // null-terminator.
-  ::memcpy(sha1, pSHA1, SHA1_DIGEST_LENGTH);
-  // Record in the result RSInfo object.
-  pDepTable.push(std::make_pair(source_name, sha1));
-  // Update the string pool pointer.
-  *pWriteStart += SHA1_DIGEST_LENGTH;
-
-  return true;
-}
-
 } // end anonymous namespace
 
-RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
-                                  const DependencyTableTy &pDeps)
-{
+RSInfo* RSInfo::ExtractFromSource(const Source& pSource, const DependencyHashTy& sourceHashToEmbed,
+                                  const char* compileCommandLineToEmbed,
+                                  const char* buildFingerprintToEmbed) {
   const llvm::Module &module = pSource.getModule();
   const char *module_name = module.getModuleIdentifier().c_str();
 
@@ -148,13 +131,13 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   size_t string_pool_size = 1;
   off_t cur_string_pool_offset = 0;
 
-  RSInfo *result = NULL;
+  RSInfo *result = nullptr;
 
   // Handle legacy case for pre-ICS bitcode that doesn't contain a metadata
   // section for ForEach. We generate a full signature for a "root" function.
-  if ((export_foreach_name == NULL) || (export_foreach_signature == NULL)) {
-    export_foreach_name = NULL;
-    export_foreach_signature = NULL;
+  if ((export_foreach_name == nullptr) || (export_foreach_signature == nullptr)) {
+    export_foreach_name = nullptr;
+    export_foreach_signature = nullptr;
     string_pool_size += 5;  // insert "root\0" for #rs_export_foreach_name
   }
 
@@ -163,32 +146,20 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   string_pool_size += getMetadataStringLength<1>(export_func);
   string_pool_size += getMetadataStringLength<1>(export_foreach_name);
 
-  // Don't forget to reserve the space for the dependency informationin string
-  // pool.
-  string_pool_size += ::strlen(LibBCCPath) + 1 + SHA1_DIGEST_LENGTH;
-  string_pool_size += ::strlen(LibCompilerRTPath) + 1 + SHA1_DIGEST_LENGTH;
-  string_pool_size += ::strlen(LibRSPath) + 1 + SHA1_DIGEST_LENGTH;
-  string_pool_size += ::strlen(LibCLCorePath) + 1 + SHA1_DIGEST_LENGTH;
-  string_pool_size += ::strlen(LibCLCoreDebugPath) + 1 + SHA1_DIGEST_LENGTH;
-#if defined(ARCH_ARM_HAVE_NEON)
-  string_pool_size += ::strlen(LibCLCoreNEONPath) + 1 + SHA1_DIGEST_LENGTH;
-#endif
-  for (unsigned i = 0, e = pDeps.size(); i != e; i++) {
-    // +1 for null-terminator
-    string_pool_size += ::strlen(/* name */pDeps[i].first) + 1;
-    // +SHA1_DIGEST_LENGTH for SHA-1 checksum
-    string_pool_size += SHA1_DIGEST_LENGTH;
-  }
+  // Reserve the space for the source hash, command line, and fingerprint
+  string_pool_size += SHA1_DIGEST_LENGTH;
+  string_pool_size += strlen(compileCommandLineToEmbed) + 1;
+  string_pool_size += strlen(buildFingerprintToEmbed) + 1;
 
   // Allocate result object
   result = new (std::nothrow) RSInfo(string_pool_size);
-  if (result == NULL) {
+  if (result == nullptr) {
     ALOGE("Out of memory when create RSInfo object for %s!", module_name);
     goto bail;
   }
 
   // Check string pool.
-  if (result->mStringPool == NULL) {
+  if (result->mStringPool == nullptr) {
     ALOGE("Out of memory when allocate string pool in RSInfo object for %s!",
           module_name);
     goto bail;
@@ -200,13 +171,13 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   // Populate all the strings and data.
 #define FOR_EACH_NODE_IN(_metadata, _node)  \
   for (unsigned i = 0, e = (_metadata)->getNumOperands(); i != e; i++)  \
-    if (((_node) = (_metadata)->getOperand(i)) != NULL)
+    if (((_node) = (_metadata)->getOperand(i)) != nullptr)
   //===--------------------------------------------------------------------===//
   // #pragma
   //===--------------------------------------------------------------------===//
   // Pragma is actually a key-value pair. The value can be an empty string while
   // the key cannot.
-  if (pragma != NULL) {
+  if (pragma != nullptr) {
     llvm::MDNode *node;
     FOR_EACH_NODE_IN(pragma, node) {
         llvm::StringRef key = getStringFromOperand(node->getOperand(0));
@@ -215,17 +186,17 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
           ALOGW("%s contains pragma metadata with empty key (skip)!",
                 module_name);
         } else {
-          result->mPragmas.push(std::make_pair(
+          result->mPragmas.push_back(std::make_pair(
               writeString(key, result->mStringPool, &cur_string_pool_offset),
               writeString(val, result->mStringPool, &cur_string_pool_offset)));
         } // key.empty()
     } // FOR_EACH_NODE_IN
-  } // pragma != NULL
+  } // pragma != nullptr
 
   //===--------------------------------------------------------------------===//
   // #rs_export_var
   //===--------------------------------------------------------------------===//
-  if (export_var != NULL) {
+  if (export_var != nullptr) {
     llvm::MDNode *node;
     FOR_EACH_NODE_IN(export_var, node) {
       llvm::StringRef name = getStringFromOperand(node->getOperand(0));
@@ -233,7 +204,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
         ALOGW("%s contains empty entry in #rs_export_var metadata (skip)!",
               module_name);
       } else {
-          result->mExportVarNames.push(
+          result->mExportVarNames.push_back(
               writeString(name, result->mStringPool, &cur_string_pool_offset));
       }
     }
@@ -242,7 +213,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   //===--------------------------------------------------------------------===//
   // #rs_export_func
   //===--------------------------------------------------------------------===//
-  if (export_func != NULL) {
+  if (export_func != nullptr) {
     llvm::MDNode *node;
     FOR_EACH_NODE_IN(export_func, node) {
       llvm::StringRef name = getStringFromOperand(node->getOperand(0));
@@ -250,7 +221,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
         ALOGW("%s contains empty entry in #rs_export_func metadata (skip)!",
               module_name);
       } else {
-        result->mExportFuncNames.push(
+        result->mExportFuncNames.push_back(
             writeString(name, result->mStringPool, &cur_string_pool_offset));
       }
     }
@@ -274,7 +245,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   // for-eachable. In this case, #rs_export_foreach (the function name) and
   // #rs_export_foreach metadata (the signature) is one-to-one mapping among
   // their entries.
-  if ((export_foreach_name != NULL) && (export_foreach_signature != NULL)) {
+  if ((export_foreach_name != nullptr) && (export_foreach_signature != nullptr)) {
     unsigned num_foreach_function;
 
     // Should be one-to-one mapping.
@@ -293,22 +264,22 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
       llvm::MDNode *signature_node = export_foreach_signature->getOperand(i);
 
       llvm::StringRef name, signature_string;
-      if (name_node != NULL) {
+      if (name_node != nullptr) {
         name = getStringFromOperand(name_node->getOperand(0));
       }
-      if (signature_node != NULL) {
+      if (signature_node != nullptr) {
         signature_string = getStringFromOperand(signature_node->getOperand(0));
       }
 
       if (!name.empty() && !signature_string.empty()) {
-        // Both name_node and signature_node are not NULL nodes.
+        // Both name_node and signature_node are not nullptr nodes.
         uint32_t signature;
         if (signature_string.getAsInteger(10, signature)) {
           ALOGE("Non-integer signature value '%s' for function %s found in %s!",
                 signature_string.str().c_str(), name.str().c_str(), module_name);
           goto bail;
         }
-        result->mExportForeachFuncs.push(std::make_pair(
+        result->mExportForeachFuncs.push_back(std::make_pair(
               writeString(name, result->mStringPool, &cur_string_pool_offset),
               signature));
       } else {
@@ -316,7 +287,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
         // if both of them are empty.
         if (name.empty() && signature_string.empty()) {
           ALOGW("Entries #%u at #rs_export_foreach_name and #rs_export_foreach"
-                " are both NULL in %s! (skip)", i, module_name);
+                " are both nullptr in %s! (skip)", i, module_name);
           continue;
         } else {
           ALOGE("Entries #%u at %s is NULL in %s! (skip)", i,
@@ -330,7 +301,7 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
     // To handle the legacy case, we generate a full signature for a "root"
     // function which means that we need to set the bottom 5 bits (0x1f) in the
     // mask.
-    result->mExportForeachFuncs.push(std::make_pair(
+    result->mExportForeachFuncs.push_back(std::make_pair(
           writeString(llvm::StringRef("root"), result->mStringPool,
                       &cur_string_pool_offset), 0x1f));
   }
@@ -338,10 +309,10 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   //===--------------------------------------------------------------------===//
   // #rs_object_slots
   //===--------------------------------------------------------------------===//
-  if (object_slots != NULL) {
+  if (object_slots != nullptr) {
     llvm::MDNode *node;
     for (unsigned int i = 0; i <= export_var->getNumOperands(); i++) {
-      result->mObjectSlots.push(0);
+      result->mObjectSlots.push_back(0);
     }
     FOR_EACH_NODE_IN(object_slots, node) {
       llvm::StringRef val = getStringFromOperand(node->getOperand(0));
@@ -355,65 +326,32 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
                 module.getModuleIdentifier().c_str());
           goto bail;
         } else {
-          result->mObjectSlots.editItemAt(slot) = 1;
+          result->mObjectSlots[slot] = 1;
         }
       }
     }
   }
 #undef FOR_EACH_NODE_IN
 
-  if (LoadBuiltInSHA1Information()) {
-    //===------------------------------------------------------------------===//
-    // Record built-in dependency information.
-    //===------------------------------------------------------------------===//
-    if (!writeDependency(LibBCCPath, LibBCCSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
+  //===------------------------------------------------------------------===//
+  // Record information used to invalidate the cache
+  //===------------------------------------------------------------------===//
+  {
+      // Store the SHA-1 in the string pool but without a null-terminator.
+      result->mHeader.sourceSha1Idx = cur_string_pool_offset;
+      uint8_t* sha1 = reinterpret_cast<uint8_t*>(result->mStringPool + cur_string_pool_offset);
+      ::memcpy(sha1, sourceHashToEmbed, SHA1_DIGEST_LENGTH);
+      // Update the string pool pointer.
+      cur_string_pool_offset += SHA1_DIGEST_LENGTH;
+      result->mSourceHash = sha1;
 
-    if (!writeDependency(LibCompilerRTPath, LibCompilerRTSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
+      result->mHeader.compileCommandLineIdx = cur_string_pool_offset;
+      result->mCompileCommandLine = writeString(compileCommandLineToEmbed, result->mStringPool,
+                                                &cur_string_pool_offset);
 
-    if (!writeDependency(LibRSPath, LibRSSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
-
-    if (!writeDependency(LibCLCorePath, LibCLCoreSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
-
-    if (!writeDependency(LibCLCoreDebugPath, LibCLCoreDebugSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
-
-#if defined(ARCH_ARM_HAVE_NEON)
-    if (!writeDependency(LibCLCoreNEONPath, LibCLCoreNEONSHA1,
-                         result->mStringPool, &cur_string_pool_offset,
-                         result->mDependencyTable)) {
-      goto bail;
-    }
-#endif
-
-    //===------------------------------------------------------------------===//
-    // Record dependency information.
-    //===------------------------------------------------------------------===//
-    for (unsigned i = 0, e = pDeps.size(); i != e; i++) {
-      if (!writeDependency(/* name */pDeps[i].first, /* SHA-1 */pDeps[i].second,
-                           result->mStringPool, &cur_string_pool_offset,
-                           result->mDependencyTable)) {
-        goto bail;
-      }
-    }
+      result->mHeader.buildFingerprintIdx = cur_string_pool_offset;
+      result->mBuildFingerprint = writeString(buildFingerprintToEmbed, result->mStringPool,
+                                              &cur_string_pool_offset);
   }
 
   //===--------------------------------------------------------------------===//
@@ -422,14 +360,14 @@ RSInfo *RSInfo::ExtractFromSource(const Source &pSource,
   // The root context of the debug information in the bitcode is put under
   // the metadata named "llvm.dbg.cu".
   result->mHeader.hasDebugInformation =
-      static_cast<uint8_t>(module.getNamedMetadata("llvm.dbg.cu") != NULL);
+      static_cast<uint8_t>(module.getNamedMetadata("llvm.dbg.cu") != nullptr);
 
-  assert((cur_string_pool_offset == string_pool_size) &&
+  assert(((size_t)cur_string_pool_offset == string_pool_size) &&
             "Unexpected string pool size!");
 
   return result;
 
 bail:
   delete result;
-  return NULL;
+  return nullptr;
 }

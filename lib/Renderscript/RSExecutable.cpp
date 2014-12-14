@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <string>
+
 #include "bcc/Renderscript/RSExecutable.h"
 
 #include "bcc/Config/Config.h"
@@ -23,8 +25,6 @@
 #include "bcc/Support/OutputFile.h"
 #include "bcc/ExecutionEngine/SymbolResolverProxy.h"
 
-#include <utils/String8.h>
-
 using namespace bcc;
 
 const char *RSExecutable::SpecialFunctionNames[] = {
@@ -32,7 +32,7 @@ const char *RSExecutable::SpecialFunctionNames[] = {
   "init",      // Initialization routine called implicitly on startup.
   ".rs.dtor",  // Static global destructor for a script instance.
   ".rs.info",  // Variable containing string of RS metadata info.
-  NULL         // Must be NULL-terminated.
+  nullptr         // Must be nullptr-terminated.
 };
 
 RSExecutable *RSExecutable::Create(RSInfo &pInfo,
@@ -43,18 +43,18 @@ RSExecutable *RSExecutable::Create(RSInfo &pInfo,
   ObjectLoader *loader = ObjectLoader::Load(pObjFile,
                                             pResolver,
                                             pInfo.hasDebugInformation());
-  if (loader == NULL) {
-    return NULL;
+  if (loader == nullptr) {
+    return nullptr;
   }
 
   // Now, all things required to build a RSExecutable object are ready.
   RSExecutable *result = new (std::nothrow) RSExecutable(pInfo,
                                                          pObjFile,
                                                          *loader);
-  if (result == NULL) {
+  if (result == nullptr) {
     ALOGE("Out of memory when create object to hold RS result file for %s!",
           pObjFile.getName().c_str());
-    return NULL;
+    return nullptr;
   }
 
   unsigned idx;
@@ -68,7 +68,7 @@ RSExecutable *RSExecutable::Create(RSInfo &pInfo,
        var_iter++, idx++) {
     const char *name = *var_iter;
     void *addr = result->getSymbolAddress(name);
-    if (addr == NULL) {
+    if (addr == nullptr) {
         //ALOGW("RS export var at entry #%u named %s cannot be found in the result "
         //"object!", idx, name);
     }
@@ -85,10 +85,6 @@ RSExecutable *RSExecutable::Create(RSInfo &pInfo,
        func_iter++, idx++) {
     const char *name = *func_iter;
     void *addr = result->getSymbolAddress(name);
-    if (addr == NULL) {
-        //      ALOGW("RS export func at entry #%u named %s cannot be found in the result"
-        //" object!", idx, name);
-    }
     result->mExportFuncAddrs.push_back(addr);
   }
 
@@ -101,13 +97,9 @@ RSExecutable *RSExecutable::Create(RSInfo &pInfo,
            foreach_end = export_foreach_funcs.end();
        foreach_iter != foreach_end; foreach_iter++, idx++) {
     const char *func_name = foreach_iter->first;
-    android::String8 expanded_func_name(func_name);
+    std::string expanded_func_name(func_name);
     expanded_func_name.append(".expand");
-    void *addr = result->getSymbolAddress(expanded_func_name.string());
-    if (addr == NULL) {
-        //      ALOGW("Expanded RS foreach at entry #%u named %s cannot be found in the "
-        //            "result object!", idx, expanded_func_name.string());
-    }
+    void *addr = result->getSymbolAddress(expanded_func_name.c_str());
     result->mExportForeachFuncAddrs.push_back(addr);
   }
 
@@ -129,11 +121,11 @@ bool RSExecutable::syncInfo(bool pForce) {
     return true;
   }
 
-  android::String8 info_path = RSInfo::GetPath(*mObjFile);
-  OutputFile info_file(info_path.string(), FileBase::kTruncate);
+  std::string info_path = RSInfo::GetPath(mObjFile->getName().c_str());
+  OutputFile info_file(info_path.c_str(), FileBase::kTruncate);
 
   if (info_file.hasError()) {
-    ALOGE("Failed to open the info file %s for write! (%s)", info_path.string(),
+    ALOGE("Failed to open the info file %s for write! (%s)", info_path.c_str(),
           info_file.getErrorMessage().c_str());
     return false;
   }
@@ -142,14 +134,14 @@ bool RSExecutable::syncInfo(bool pForce) {
   // first.
   if (!mObjFile->lock(FileBase::kWriteLock)) {
     ALOGE("Write to RS info file %s required the acquisition of the write lock "
-          "on %s but got failure! (%s)", info_path.string(),
+          "on %s but got failure! (%s)", info_path.c_str(),
           mObjFile->getName().c_str(), info_file.getErrorMessage().c_str());
     return false;
   }
 
   // Perform the write.
   if (!mInfo->write(info_file)) {
-    ALOGE("Failed to sync the RS info file %s!", info_path.string());
+    ALOGE("Failed to sync the RS info file %s!", info_path.c_str());
     mObjFile->unlock();
     return false;
   }
@@ -166,7 +158,7 @@ void RSExecutable::dumpDisassembly(OutputFile &pOutput) const {
   }
 
   // Get MC codegen emitted function name list.
-  android::Vector<const char *> func_list;
+  std::vector<const char *> func_list;
 
   if (!mLoader->getSymbolNameList(func_list, ObjectLoader::kFunctionType)) {
       ALOGW("Failed to get the list of function name in %s for disassembly!",
@@ -178,7 +170,7 @@ void RSExecutable::dumpDisassembly(OutputFile &pOutput) const {
       void *func = mLoader->getSymbolAddress(func_name);
       size_t func_size = mLoader->getSymbolSize(func_name);
 
-      if (func == NULL) {
+      if (func == nullptr) {
         continue;
       }
       DisassembleResult result =

@@ -16,43 +16,26 @@
 
 #include "bcc/Renderscript/RSScript.h"
 
+#include "bcc/Assert.h"
 #include "bcc/Renderscript/RSInfo.h"
 #include "bcc/Source.h"
 #include "bcc/Support/Log.h"
 
 using namespace bcc;
 
-bool RSScript::LinkRuntime(RSScript &pScript, const char *rt_path) {
+bool RSScript::LinkRuntime(RSScript &pScript, const char *core_lib) {
+  bccAssert(core_lib != nullptr);
+
   // Using the same context with the source in pScript.
   BCCContext &context = pScript.getSource().getContext();
-  const char* core_lib = RSInfo::LibCLCorePath;
-
-  // SSE2- or above capable devices will use an optimized library.
-#if defined(ARCH_X86_HAVE_SSE2)
-  core_lib = RSInfo::LibCLCoreX86Path;
-#endif
-
-  // NEON-capable devices can use an accelerated math library for all
-  // reduced precision scripts.
-#if defined(ARCH_ARM_HAVE_NEON)
-  const RSInfo* info = pScript.getInfo();
-  if ((info != NULL) &&
-      (info->getFloatPrecisionRequirement() != RSInfo::FP_Full)) {
-    core_lib = RSInfo::LibCLCoreNEONPath;
-  }
-#endif
-
-  if (rt_path != NULL) {
-    core_lib = rt_path;
-  }
 
   Source *libclcore_source = Source::CreateFromFile(context, core_lib);
-  if (libclcore_source == NULL) {
+  if (libclcore_source == nullptr) {
     ALOGE("Failed to load Renderscript library '%s' to link!", core_lib);
     return false;
   }
 
-  if (NULL != pScript.mLinkRuntimeCallback) {
+  if (pScript.mLinkRuntimeCallback != nullptr) {
     pScript.mLinkRuntimeCallback(&pScript,
         &pScript.getSource().getModule(), &libclcore_source->getModule());
   }
@@ -68,12 +51,12 @@ bool RSScript::LinkRuntime(RSScript &pScript, const char *rt_path) {
 }
 
 RSScript::RSScript(Source &pSource)
-  : Script(pSource), mInfo(NULL), mCompilerVersion(0),
-    mOptimizationLevel(kOptLvl3), mLinkRuntimeCallback(NULL),
+  : Script(pSource), mInfo(nullptr), mCompilerVersion(0),
+    mOptimizationLevel(kOptLvl3), mLinkRuntimeCallback(nullptr),
     mEmbedInfo(false) { }
 
 bool RSScript::doReset() {
-  mInfo = NULL;
+  mInfo = nullptr;
   mCompilerVersion = 0;
   mOptimizationLevel = kOptLvl3;
   return true;

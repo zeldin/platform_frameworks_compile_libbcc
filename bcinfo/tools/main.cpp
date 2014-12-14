@@ -18,12 +18,12 @@
 #include <bcinfo/BitcodeWrapper.h>
 #include <bcinfo/MetadataExtractor.h>
 
-#include <llvm/ADT/OwningPtr.h>
 #include <llvm/ADT/StringRef.h>
-#include <llvm/Assembly/AssemblyAnnotationWriter.h>
 #include <llvm/Bitcode/ReaderWriter.h>
+#include <llvm/IR/AssemblyAnnotationWriter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/ManagedStatic.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/ToolOutputFile.h>
@@ -137,8 +137,10 @@ static int dumpInfo(bcinfo::MetadataExtractor *ME) {
           ME->getExportForEachSignatureCount());
   const char **nameList = ME->getExportForEachNameList();
   const uint32_t *sigList = ME->getExportForEachSignatureList();
+  const uint32_t *inputCountList = ME->getExportForEachInputCountList();
   for (size_t i = 0; i < ME->getExportForEachSignatureCount(); i++) {
-    fprintf(info, "%u - %s\n", sigList[i], nameList[i]);
+    fprintf(info, "%u - %s - %u\n", sigList[i], nameList[i],
+            inputCountList[i]);
   }
 
   fprintf(info, "objectSlotCount: %u\n", ME->getObjectSlotCount());
@@ -165,9 +167,6 @@ static void dumpMetadata(bcinfo::MetadataExtractor *ME) {
   case bcinfo::RS_FP_Relaxed:
     printf("Relaxed\n\n");
     break;
-  case bcinfo::RS_FP_Imprecise:
-    printf("Imprecise\n\n");
-    break;
   default:
     printf("UNKNOWN\n\n");
     break;
@@ -191,9 +190,10 @@ static void dumpMetadata(bcinfo::MetadataExtractor *ME) {
          ME->getExportForEachSignatureCount());
   const char **nameList = ME->getExportForEachNameList();
   const uint32_t *sigList = ME->getExportForEachSignatureList();
+  const uint32_t *inputCountList = ME->getExportForEachInputCountList();
   for (size_t i = 0; i < ME->getExportForEachSignatureCount(); i++) {
-    printf("exportForEachSignatureList[%u]: %s - %u\n", i, nameList[i],
-           sigList[i]);
+    printf("exportForEachSignatureList[%u]: %s - %u - %u\n", i, nameList[i],
+           sigList[i], inputCountList[i]);
   }
   printf("\n");
 
@@ -255,7 +255,7 @@ static size_t readBitcode(const char **bitcode) {
 static void releaseBitcode(const char **bitcode) {
   if (bitcode && *bitcode) {
     free((void*) *bitcode);
-    *bitcode = NULL;
+    *bitcode = nullptr;
   }
   return;
 }
@@ -267,7 +267,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const char *bitcode = NULL;
+  const char *bitcode = nullptr;
   size_t bitcodeSize = readBitcode(&bitcode);
 
   unsigned int version = 0;
@@ -288,14 +288,14 @@ int main(int argc, char** argv) {
     printf("optimizationLevel: %u\n\n", bcWrapper.getOptimizationLevel());
   }
 
-  llvm::OwningPtr<bcinfo::BitcodeTranslator> BT;
+  std::unique_ptr<bcinfo::BitcodeTranslator> BT;
   BT.reset(new bcinfo::BitcodeTranslator(bitcode, bitcodeSize, version));
   if (!BT->translate()) {
     fprintf(stderr, "failed to translate bitcode\n");
     return 3;
   }
 
-  llvm::OwningPtr<bcinfo::MetadataExtractor> ME;
+  std::unique_ptr<bcinfo::MetadataExtractor> ME;
   ME.reset(new bcinfo::MetadataExtractor(BT->getTranslatedBitcode(),
                                          BT->getTranslatedBitcodeSize()));
   if (!ME->extract()) {
@@ -312,20 +312,23 @@ int main(int argc, char** argv) {
     llvm::LLVMContext &ctx = llvm::getGlobalContext();
     llvm::llvm_shutdown_obj called_on_exit;
 
-    llvm::OwningPtr<llvm::MemoryBuffer> mem;
+    std::unique_ptr<llvm::MemoryBuffer> mem;
 
     mem.reset(llvm::MemoryBuffer::getMemBuffer(
         llvm::StringRef(translatedBitcode, translatedBitcodeSize),
         inFile.c_str(), false));
 
-    llvm::OwningPtr<llvm::Module> module;
-    std::string errmsg;
-    module.reset(llvm::ParseBitcodeFile(mem.get(), ctx, &errmsg));
-    if (module.get() != 0 && module->MaterializeAllPermanently(&errmsg)) {
-      module.reset();
+    std::unique_ptr<llvm::Module> module;
+    llvm::ErrorOr<llvm::Module*> moduleOrError = llvm::parseBitcodeFile(mem.get(), ctx);
+    std::error_code ec = moduleOrError.getError();
+    if (!ec) {
+        module.reset(moduleOrError.get());
+        ec = module->materializeAllPermanently();
     }
-
-    if (module.get() == 0) {
+    std::string errmsg;
+    if (ec) {
+      errmsg = ec.message();
+      module.reset();
       if (errmsg.size()) {
         fprintf(stderr, "error: %s\n", errmsg.c_str());
       } else {
@@ -334,10 +337,10 @@ int main(int argc, char** argv) {
       return 5;
     }
 
-    llvm::OwningPtr<llvm::tool_output_file> tof(
+    std::unique_ptr<llvm::tool_output_file> tof(
         new llvm::tool_output_file(outFile.c_str(), errmsg,
-                                   llvm::raw_fd_ostream::F_Binary));
-    llvm::OwningPtr<llvm::AssemblyAnnotationWriter> ann;
+                                   llvm::sys::fs::F_None));
+    std::unique_ptr<llvm::AssemblyAnnotationWriter> ann;
     module->print(tof->os(), ann.get());
 
     tof->keep();

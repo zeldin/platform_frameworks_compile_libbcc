@@ -14,17 +14,19 @@
  * limitations under the License.
  */
 
-#include "llvm/Analysis/Verifier.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/Pass.h"
 #include "llvm/PassManager.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/IRReader.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/SystemUtils.h"
 #include "llvm/Support/ToolOutputFile.h"
 using namespace llvm;
@@ -87,24 +89,17 @@ static RegisterPass<StripAttributes> RPSA("StripAttributes",
     "Strip Function Attributes Pass");
 
 
-static inline std::auto_ptr<Module> LoadFile(const char *argv0,
-                                             const std::string &FN,
-                                             LLVMContext& Context) {
-  sys::Path Filename;
-  if (!Filename.set(FN)) {
-    errs() << "Invalid file name: '" << FN << "'\n";
-    return std::auto_ptr<Module>();
+static inline std::unique_ptr<Module> LoadFile(const char *argv0,
+                                               const std::string &FN,
+                                               LLVMContext& Context) {
+  SMDiagnostic Err;
+  Module* Result = ParseIRFile(FN, Err, Context);
+  if (Result) {
+    return std::unique_ptr<Module>(Result);   // Load successful!
   }
 
-  SMDiagnostic Err;
-  Module* Result = 0;
-
-  const std::string &FNStr = Filename.str();
-  Result = ParseIRFile(FNStr, Err, Context);
-  if (Result) return std::auto_ptr<Module>(Result);   // Load successful!
-
   Err.print(argv0, errs());
-  return std::auto_ptr<Module>();
+  return std::unique_ptr<Module>();
 }
 
 
@@ -119,7 +114,7 @@ int main(int argc, char **argv) {
 
   std::string ErrorMessage;
 
-  std::auto_ptr<Module> M(LoadFile(argv[0], InputFilenames[0], Context));
+  std::unique_ptr<Module> M(LoadFile(argv[0], InputFilenames[0], Context));
   if (M.get() == 0) {
     errs() << argv[0] << ": error loading file '"
            << InputFilenames[0] << "'\n";
@@ -133,7 +128,7 @@ int main(int argc, char **argv) {
 
   std::string ErrorInfo;
   tool_output_file Out(OutputFilename.c_str(), ErrorInfo,
-                       raw_fd_ostream::F_Binary);
+                       sys::fs::F_None);
   if (!ErrorInfo.empty()) {
     errs() << ErrorInfo << '\n';
     return 1;

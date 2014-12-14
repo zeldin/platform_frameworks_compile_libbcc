@@ -31,11 +31,16 @@ namespace bcc {
 
 class ELFObjectLoaderImpl : public ObjectLoaderImpl {
 private:
+#ifdef __LP64__
+  ELFObject<64> *mObject;
+  ELFSectionSymTab<64> *mSymTab;
+#else
   ELFObject<32> *mObject;
   ELFSectionSymTab<32> *mSymTab;
+#endif
 
 public:
-  ELFObjectLoaderImpl() : ObjectLoaderImpl(), mObject(NULL), mSymTab(NULL) { }
+  ELFObjectLoaderImpl() : ObjectLoaderImpl(), mObject(nullptr), mSymTab(nullptr) { }
 
   virtual bool load(const void *pMem, size_t pMemSize);
 
@@ -47,7 +52,7 @@ public:
 
   virtual size_t getSymbolSize(const char *pName) const;
 
-  virtual bool getSymbolNameList(android::Vector<const char *>& pNameList,
+  virtual bool getSymbolNameList(std::vector<const char *>& pNameList,
                                  ObjectLoader::SymbolType pType) const;
   ~ELFObjectLoaderImpl();
 };

@@ -22,37 +22,42 @@ ifneq ($(TARGET_BUILD_VARIANT),eng)
 local_cflags_for_libbcinfo += -D__DISABLE_ASSERTS
 endif
 
-ifeq "REL" "$(PLATFORM_VERSION_CODENAME)"
-  BCINFO_API_VERSION := $(PLATFORM_SDK_VERSION)
-else
-  # Increment by 1 whenever this is not a final release build, since we want to
-  # be able to see the RS version number change during development.
-  # See build/core/version_defaults.mk for more information about this.
-  BCINFO_API_VERSION := "(1 + $(PLATFORM_SDK_VERSION))"
-endif
-local_cflags_for_libbcinfo += -DBCINFO_API_VERSION=$(BCINFO_API_VERSION)
-
 LOCAL_PATH := $(call my-dir)
+
+include frameworks/compile/slang/rs_version.mk
+local_cflags_for_libbcinfo += $(RS_VERSION_DEFINE)
 
 libbcinfo_SRC_FILES := \
   BitcodeTranslator.cpp \
   BitcodeWrapper.cpp \
   MetadataExtractor.cpp
 
-libbcinfo_C_INCLUDES := $(LOCAL_PATH)/../include
+libbcinfo_C_INCLUDES := \
+  $(LOCAL_PATH)/../include \
+  $(LOCAL_PATH)/../../slang
+
 libbcinfo_STATIC_LIBRARIES := \
   libLLVMWrap \
   libLLVMBitReader_2_7 \
-  libLLVMBitReader_3_0
+  libLLVMBitReader_3_0 \
+  libLLVMBitWriter_3_2
 
 LLVM_ROOT_PATH := external/llvm
 
+ifeq ($(TARGET_ARCH),arm64)
+$(info TODOArm64: $(LOCAL_PATH)/Android.mk Enable build of libbcinfo device shared library)
+endif
+
+ifeq ($(TARGET_ARCH),mips64)
+$(info TODOMips64: $(LOCAL_PATH)/Android.mk Enable build of libbcinfo device shared library)
+endif
+
+ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := libbcinfo
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 LOCAL_MODULE_TAGS := optional
-intermediates := $(local-intermediates-dir)
 
 LOCAL_SRC_FILES := $(libbcinfo_SRC_FILES)
 
@@ -61,10 +66,11 @@ LOCAL_CFLAGS += $(local_cflags_for_libbcinfo)
 LOCAL_C_INCLUDES := $(libbcinfo_C_INCLUDES)
 
 LOCAL_STATIC_LIBRARIES := $(libbcinfo_STATIC_LIBRARIES)
-LOCAL_SHARED_LIBRARIES := libLLVM libcutils liblog libstlport
+LOCAL_SHARED_LIBRARIES := libLLVM libcutils liblog
 
 include $(LLVM_ROOT_PATH)/llvm-device-build.mk
 include $(BUILD_SHARED_LIBRARY)
+endif
 
 include $(CLEAR_VARS)
 
@@ -83,7 +89,9 @@ LOCAL_STATIC_LIBRARIES += $(libbcinfo_STATIC_LIBRARIES)
 LOCAL_STATIC_LIBRARIES += libcutils liblog
 LOCAL_SHARED_LIBRARIES += libLLVM
 
+ifndef USE_MINGW
 LOCAL_LDLIBS := -ldl -lpthread
+endif
 
 include $(LLVM_ROOT_PATH)/llvm-host-build.mk
 include $(BUILD_HOST_SHARED_LIBRARY)

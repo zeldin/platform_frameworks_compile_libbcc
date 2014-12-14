@@ -26,13 +26,10 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
-#include <llvm/Support/system_error.h>
 
 #include <bcc/BCCContext.h>
 #include <bcc/Compiler.h>
-#include <bcc/Config/BuildInfo.h>
 #include <bcc/Config/Config.h>
-#include <bcc/ExecutionEngine/ObjectLoader.h>
 #include <bcc/ExecutionEngine/SymbolResolverProxy.h>
 #include <bcc/ExecutionEngine/SymbolResolvers.h>
 #include <bcc/Renderscript/RSCompilerDriver.h>
@@ -42,7 +39,6 @@
 #include <bcc/Support/Initialization.h>
 #include <bcc/Support/InputFile.h>
 #include <bcc/Support/OutputFile.h>
-#include <bcc/Support/TargetCompilerConfigs.h>
 
 using namespace bcc;
 
@@ -63,7 +59,6 @@ llvm::cl::opt<std::string>
 OptRuntimePath("rt-path", llvm::cl::desc("Specify the runtime library path"),
                llvm::cl::value_desc("path"));
 
-#ifndef TARGET_BUILD
 llvm::cl::opt<std::string>
 OptTargetTriple("mtriple",
                 llvm::cl::desc("Specify the target triple (default: "
@@ -74,7 +69,6 @@ OptTargetTriple("mtriple",
 llvm::cl::alias OptTargetTripleC("C", llvm::cl::NotHidden,
                                  llvm::cl::desc("Alias for -mtriple"),
                                  llvm::cl::aliasopt(OptTargetTriple));
-#endif
 
 //===----------------------------------------------------------------------===//
 // Compiler Options
@@ -113,14 +107,8 @@ OptShared("shared", llvm::cl::desc("Create a shared library from input bitcode "
 void BCCVersionPrinter() {
   llvm::raw_ostream &os = llvm::outs();
   os << "libbcc (The Android Open Source Project, http://www.android.com/):\n"
-     << "  Build time: " << BuildInfo::GetBuildTime() << "\n"
-     << "  Build revision: " << BuildInfo::GetBuildRev() << "\n"
-     << "  Build source blob: " << BuildInfo::GetBuildSourceBlob() << "\n"
-     << "  Default target: " << DEFAULT_TARGET_TRIPLE_STRING << "\n";
-
-  os << "\n";
-
-  os << "LLVM (http://llvm.org/):\n"
+     << "  Default target: " << DEFAULT_TARGET_TRIPLE_STRING << "\n\n"
+     << "LLVM (http://llvm.org/):\n"
      << "  Version: " << PACKAGE_VERSION << "\n";
   return;
 }
@@ -129,31 +117,31 @@ void BCCVersionPrinter() {
 
 RSScript *PrepareRSScript(BCCContext &pContext,
                           const llvm::cl::list<std::string> &pBitcodeFiles) {
-  RSScript *result = NULL;
+  RSScript *result = nullptr;
 
   for (unsigned i = 0; i < pBitcodeFiles.size(); i++) {
     const std::string &input_bitcode = pBitcodeFiles[i];
     Source *source = Source::CreateFromFile(pContext, input_bitcode);
-    if (source == NULL) {
+    if (source == nullptr) {
       llvm::errs() << "Failed to load llvm module from file `" << input_bitcode
                    << "'!\n";
-      return NULL;
+      return nullptr;
     }
 
-    if (result != NULL) {
+    if (result != nullptr) {
       if (!result->mergeSource(*source, /* pPreserveSource */false)) {
         llvm::errs() << "Failed to merge the llvm module `" << input_bitcode
                      << "' to compile!\n";
         delete source;
-        return NULL;
+        return nullptr;
       }
     } else {
       result = new (std::nothrow) RSScript(*source);
-      if (result == NULL) {
+      if (result == nullptr) {
         llvm::errs() << "Out of memory when create script for file `"
                      << input_bitcode << "'!\n";
         delete source;
-        return NULL;
+        return nullptr;
       }
     }
   }
@@ -164,14 +152,10 @@ RSScript *PrepareRSScript(BCCContext &pContext,
 static inline
 bool ConfigCompiler(RSCompilerDriver &pCompilerDriver) {
   RSCompiler *compiler = pCompilerDriver.getCompiler();
-  CompilerConfig *config = NULL;
+  CompilerConfig *config = nullptr;
 
-#ifdef TARGET_BUILD
-  config = new (std::nothrow) DefaultCompilerConfig();
-#else
   config = new (std::nothrow) CompilerConfig(OptTargetTriple);
-#endif
-  if (config == NULL) {
+  if (config == nullptr) {
     llvm::errs() << "Out of memory when create the compiler configuration!\n";
     return false;
   }
@@ -185,6 +169,7 @@ bool ConfigCompiler(RSCompilerDriver &pCompilerDriver) {
     fv.push_back("-neonfp");
     config->setFeatureString(fv);
   }
+
   // Compatibility mode on x86 requires atom code generation.
   if (config->getTriple().find("i686") != std::string::npos) {
     config->setCPU("atom");
@@ -234,8 +219,8 @@ std::string DetermineOutputFilename(const std::string &pOutputPath) {
   const std::string &input_path = OptInputFilenames[0];
   llvm::SmallString<200> output_path(input_path);
 
-  llvm::error_code err = llvm::sys::fs::make_absolute(output_path);
-  if (err != llvm::errc::success) {
+  std::error_code err = llvm::sys::fs::make_absolute(output_path);
+  if (err) {
     llvm::errs() << "Failed to determine the absolute path of `" << input_path
                  << "'! (detail: " << err.message() << ")\n";
     return "";
@@ -278,9 +263,12 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  RSScript *s = NULL;
+  RSScript *s = nullptr;
   s = PrepareRSScript(context, OptInputFilenames);
-  rscd.build(*s, OutputFilename.c_str(), OptRuntimePath.c_str());
+  if (!rscd.buildForCompatLib(*s, OutputFilename.c_str(), OptRuntimePath.c_str())) {
+    fprintf(stderr, "Failed to compile script!");
+    return EXIT_FAILURE;
+  }
 
   return EXIT_SUCCESS;
 }

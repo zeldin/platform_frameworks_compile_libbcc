@@ -36,33 +36,6 @@ inline bool helper_read_list_item(const ItemType &pItem,
                                   const RSInfo &pInfo,
                                   ItemContainer &pResult);
 
-// Process DependencyTableItem in the file
-template<> inline bool
-helper_read_list_item<rsinfo::DependencyTableItem, RSInfo::DependencyTableTy>(
-    const rsinfo::DependencyTableItem &pItem,
-    const RSInfo &pInfo,
-    RSInfo::DependencyTableTy &pResult)
-{
-  const char *id = pInfo.getStringFromPool(pItem.id);
-  const uint8_t *sha1 =
-      reinterpret_cast<const uint8_t *>(pInfo.getStringFromPool(pItem.sha1));
-
-  if (id == NULL) {
-    ALOGE("Invalid string index %d for source id in RS dependenct table.",
-          pItem.id);
-    return false;
-  }
-
-  if (sha1 == NULL) {
-    ALOGE("Invalid string index %d for SHA-1 checksum in RS dependenct table.",
-          pItem.id);
-    return false;
-  }
-
-  pResult.push(std::make_pair(id, sha1));
-  return true;
-}
-
 // Process PragmaItem in the file
 template<> inline bool
 helper_read_list_item<rsinfo::PragmaItem, RSInfo::PragmaListTy>(
@@ -73,17 +46,17 @@ helper_read_list_item<rsinfo::PragmaItem, RSInfo::PragmaListTy>(
   const char *key = pInfo.getStringFromPool(pItem.key);
   const char *value =pInfo.getStringFromPool(pItem.value);
 
-  if (key == NULL) {
+  if (key == nullptr) {
     ALOGE("Invalid string index %d for key in RS pragma list.", pItem.key);
     return false;
   }
 
-  if (value == NULL) {
+  if (value == nullptr) {
     ALOGE("Invalid string index %d for value in RS pragma list.", pItem.value);
     return false;
   }
 
-  pResult.push(std::make_pair(key, value));
+  pResult.push_back(std::make_pair(key, value));
   return true;
 }
 
@@ -94,7 +67,7 @@ helper_read_list_item<rsinfo::ObjectSlotItem, RSInfo::ObjectSlotListTy>(
     const RSInfo &pInfo,
     RSInfo::ObjectSlotListTy &pResult)
 {
-  pResult.push(pItem.slot);
+  pResult.push_back(pItem.slot);
   return true;
 }
 
@@ -107,12 +80,12 @@ helper_read_list_item<rsinfo::ExportVarNameItem, RSInfo::ExportVarNameListTy>(
 {
   const char *name = pInfo.getStringFromPool(pItem.name);
 
-  if (name == NULL) {
+  if (name == nullptr) {
     ALOGE("Invalid string index %d for name in RS export vars.", pItem.name);
     return false;
   }
 
-  pResult.push(name);
+  pResult.push_back(name);
   return true;
 }
 
@@ -125,12 +98,12 @@ helper_read_list_item<rsinfo::ExportFuncNameItem, RSInfo::ExportFuncNameListTy>(
 {
   const char *name = pInfo.getStringFromPool(pItem.name);
 
-  if (name == NULL) {
+  if (name == nullptr) {
     ALOGE("Invalid string index %d for name in RS export funcs.", pItem.name);
     return false;
   }
 
-  pResult.push(name);
+  pResult.push_back(name);
   return true;
 }
 
@@ -143,12 +116,12 @@ helper_read_list_item<rsinfo::ExportForeachFuncItem, RSInfo::ExportForeachFuncLi
 {
   const char *name = pInfo.getStringFromPool(pItem.name);
 
-  if (name == NULL) {
+  if (name == nullptr) {
     ALOGE("Invalid string index %d for name in RS export foreachs.", pItem.name);
     return false;
   }
 
-  pResult.push(std::make_pair(name, pItem.signature));
+  pResult.push_back(std::make_pair(name, pItem.signature));
   return true;
 }
 
@@ -173,9 +146,9 @@ inline bool helper_read_list(const uint8_t *pData,
 
 } // end anonymous namespace
 
-RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) {
-  android::FileMap *map = NULL;
-  RSInfo *result = NULL;
+RSInfo *RSInfo::ReadFromFile(InputFile &pInput) {
+  android::FileMap *map = nullptr;
+  RSInfo *result = nullptr;
   const uint8_t *data;
   const rsinfo::Header *header;
   size_t filesize;
@@ -198,7 +171,7 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
   // Create memory map for the file.
   map = pInput.createMap(/* pOffset */cur_input_offset,
                          /* pLength */filesize - cur_input_offset);
-  if (map == NULL) {
+  if (map == nullptr) {
     ALOGE("Failed to map RS info file %s to the memory! (%s)",
           input_filename, pInput.getErrorMessage().c_str());
     goto bail;
@@ -219,7 +192,7 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
   // Check the version.
   if (::memcmp(header->version,
                RSINFO_VERSION,
-               sizeof((header->version)) != 0)) {
+               sizeof(header->version)) != 0) {
     ALOGV("Mismatch the version of RS info file %s: (current) %s v.s. (file) "
           "%s. Treat it as as a dirty cache.", input_filename, RSINFO_VERSION,
           header->version);
@@ -228,7 +201,6 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
 
   // Check the size.
   if ((header->headerSize != sizeof(rsinfo::Header)) ||
-      (header->dependencyTable.itemSize != sizeof(rsinfo::DependencyTableItem)) ||
       (header->pragmaList.itemSize != sizeof(rsinfo::PragmaItem)) ||
       (header->objectSlotList.itemSize != sizeof(rsinfo::ObjectSlotItem)) ||
       (header->exportVarNameList.itemSize != sizeof(rsinfo::ExportVarNameItem)) ||
@@ -242,7 +214,6 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
 #define LIST_DATA_RANGE(_list_header) \
   ((_list_header).offset + (_list_header).count * (_list_header).itemSize)
   if (((header->headerSize + header->strPoolSize) > filesize) ||
-      (LIST_DATA_RANGE(header->dependencyTable) > filesize) ||
       (LIST_DATA_RANGE(header->pragmaList) > filesize) ||
       (LIST_DATA_RANGE(header->objectSlotList) > filesize) ||
       (LIST_DATA_RANGE(header->exportVarNameList) > filesize) ||
@@ -255,7 +226,7 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
 
   // File seems ok, create result RSInfo object.
   result = new (std::nothrow) RSInfo(header->strPoolSize);
-  if (result == NULL) {
+  if (result == nullptr) {
     ALOGE("Out of memory when create RSInfo object for %s!", input_filename);
     goto bail;
   }
@@ -269,7 +240,7 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
   if (header->strPoolSize > 0) {
     // Copy the string pool. The string pool is immediately after the header at
     // the offset header->headerSize.
-    if (result->mStringPool == NULL) {
+    if (result->mStringPool == nullptr) {
       ALOGE("Out of memory when allocate string pool for RS info file %s!",
             input_filename);
       goto bail;
@@ -279,14 +250,23 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
   }
 
   // Populate all the data to the result object.
-  if (!helper_read_list<rsinfo::DependencyTableItem, DependencyTableTy>
-        (data, *result, header->dependencyTable, result->mDependencyTable)) {
-    goto bail;
+  result->mSourceHash =
+              reinterpret_cast<const uint8_t*>(result->getStringFromPool(header->sourceSha1Idx));
+  if (result->mSourceHash == nullptr) {
+      ALOGE("Invalid string index %d for SHA-1 checksum of source.", header->sourceSha1Idx);
+      goto bail;
   }
 
-  // Check dependency to see whether the cache is dirty or not.
-  if (!CheckDependency(*result, pInput.getName().c_str(), pDeps)) {
-    goto bail;
+  result->mCompileCommandLine = result->getStringFromPool(header->compileCommandLineIdx);
+  if (result->mCompileCommandLine == nullptr) {
+      ALOGE("Invalid string index %d for compile command line.", header->compileCommandLineIdx);
+      goto bail;
+  }
+
+  result->mBuildFingerprint = result->getStringFromPool(header->buildFingerprintIdx);
+  if (result->mBuildFingerprint == nullptr) {
+      ALOGE("Invalid string index %d for build fingerprint.", header->buildFingerprintIdx);
+      goto bail;
   }
 
   if (!helper_read_list<rsinfo::PragmaItem, PragmaListTy>
@@ -320,11 +300,11 @@ RSInfo *RSInfo::ReadFromFile(InputFile &pInput, const DependencyTableTy &pDeps) 
   return result;
 
 bail:
-  if (map != NULL) {
+  if (map != nullptr) {
     map->release();
   }
 
   delete result;
 
-  return NULL;
+  return nullptr;
 } // RSInfo::ReadFromFile

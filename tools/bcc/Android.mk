@@ -23,8 +23,7 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := bcc
 LOCAL_MODULE_CLASS := EXECUTABLES
 
-LOCAL_SRC_FILES := \
-  main.cpp
+LOCAL_SRC_FILES := Main.cpp
 
 LOCAL_SHARED_LIBRARIES := \
   libbcc \
@@ -35,15 +34,14 @@ LOCAL_C_INCLUDES := \
   $(LOCAL_PATH)/../../include
 
 LOCAL_LDLIBS = -ldl
-LOCAL_SRC_FILES := Main.cpp
 
 include $(LIBBCC_HOST_BUILD_MK)
-include $(LIBBCC_GEN_CONFIG_MK)
 include $(LLVM_HOST_BUILD_MK)
 include $(BUILD_HOST_EXECUTABLE)
 
 # Executable for target
 # ========================================================
+ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := bcc
@@ -51,10 +49,9 @@ LOCAL_MODULE_CLASS := EXECUTABLES
 
 LOCAL_SRC_FILES := Main.cpp
 
-LOCAL_SHARED_LIBRARIES := libdl libstlport libbcinfo libbcc libLLVM libutils libcutils
+LOCAL_SHARED_LIBRARIES := libdl libbcinfo libbcc libLLVM libutils libcutils
 
-include external/stlport/libstlport.mk
 include $(LIBBCC_DEVICE_BUILD_MK)
-include $(LIBBCC_GEN_CONFIG_MK)
 include $(LLVM_DEVICE_BUILD_MK)
 include $(BUILD_EXECUTABLE)
+endif

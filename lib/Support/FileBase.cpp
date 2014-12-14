@@ -30,6 +30,18 @@
 
 using namespace bcc;
 
+#ifdef _WIN32
+// TODO: Fix flock usage under windows
+#define LOCK_SH 0
+#define LOCK_EX 0
+#define LOCK_NB 0
+#define LOCK_UN 0
+
+int flock(int fd, int operation) {
+  return 0;
+}
+#endif  // _WIN32
+
 FileBase::FileBase(const std::string &pFilename,
                    unsigned pOpenFlags,
                    unsigned pFlags)
@@ -116,7 +128,7 @@ bool FileBase::checkFileIntegrity() {
 
 void FileBase::detectError() {
   // Read error from errno.
-  mError.assign(errno, llvm::posix_category());
+  mError.assign(errno, std::generic_category());
 }
 
 bool FileBase::lock(enum LockModeEnum pMode,
@@ -142,7 +154,7 @@ bool FileBase::lock(enum LockModeEnum pMode,
   } else if (pMode == kWriteLock) {
     lock_operation = LOCK_EX;
   } else {
-    mError.assign(llvm::errc::invalid_argument, llvm::posix_category());
+    mError = std::make_error_code(std::errc::invalid_argument);
     return false;
   }
 
@@ -213,19 +225,19 @@ void FileBase::unlock() {
 android::FileMap *FileBase::createMap(off_t pOffset, size_t pLength,
                                       bool pIsReadOnly) {
   if (mFD < 0 || hasError()) {
-    return NULL;
+    return nullptr;
   }
 
   android::FileMap *map = new (std::nothrow) android::FileMap();
-  if (map == NULL) {
-    mError.assign(llvm::errc::not_enough_memory, llvm::system_category());
-    return NULL;
+  if (map == nullptr) {
+    mError = make_error_code(std::errc::not_enough_memory);
+    return nullptr;
   }
 
-  if (!map->create(NULL, mFD, pOffset, pLength, pIsReadOnly)) {
+  if (!map->create(nullptr, mFD, pOffset, pLength, pIsReadOnly)) {
     detectError();
     map->release();
-    return NULL;
+    return nullptr;
   }
 
   return map;

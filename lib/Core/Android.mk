@@ -25,14 +25,13 @@ libbcc_core_SRC_FILES := \
   BCCContext.cpp \
   BCCContextImpl.cpp \
   Compiler.cpp \
-  Linker.cpp \
   Script.cpp \
   Source.cpp
 
 #=====================================================================
 # Device Static Library: libbccCore
 #=====================================================================
-
+ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := libbccCore
@@ -42,11 +41,9 @@ LOCAL_MODULE_CLASS := STATIC_LIBRARIES
 LOCAL_SRC_FILES := $(libbcc_core_SRC_FILES)
 
 include $(LIBBCC_DEVICE_BUILD_MK)
-include $(LIBBCC_GEN_CONFIG_MK)
-include $(MCLD_DEVICE_BUILD_MK)
-#include $(LLVM_DEVICE_BUILD_MK)
+include $(LLVM_DEVICE_BUILD_MK)
 include $(BUILD_STATIC_LIBRARY)
-
+endif
 
 #=====================================================================
 # Host Static Library: libbccCore
@@ -61,7 +58,5 @@ LOCAL_MODULE_CLASS := STATIC_LIBRARIES
 LOCAL_SRC_FILES := $(libbcc_core_SRC_FILES)
 
 include $(LIBBCC_HOST_BUILD_MK)
-include $(LIBBCC_GEN_CONFIG_MK)
-include $(MCLD_HOST_BUILD_MK)
-#include $(LLVM_HOST_BUILD_MK)
+include $(LLVM_HOST_BUILD_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)

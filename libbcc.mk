@@ -24,7 +24,7 @@ endif
 
 LLVM_ROOT_PATH          := external/llvm
 MCLD_ROOT_PATH          := frameworks/compile/mclinker
-RSLOADER_ROOT_PATH      := frameworks/rs/driver/linkloader
+RSLOADER_ROOT_PATH      := frameworks/rs/cpu_ref/linkloader
 
 #=====================================================================
 # Related Makefile Paths of libbcc
@@ -32,19 +32,8 @@ RSLOADER_ROOT_PATH      := frameworks/rs/driver/linkloader
 
 LIBBCC_HOST_BUILD_MK    := $(LIBBCC_ROOT_PATH)/libbcc-host-build.mk
 LIBBCC_DEVICE_BUILD_MK  := $(LIBBCC_ROOT_PATH)/libbcc-device-build.mk
-LIBBCC_GEN_CONFIG_MK    := $(LIBBCC_ROOT_PATH)/libbcc-gen-config-from-mk.mk
-
-#=====================================================================
-# Configuration of libbcc
-#=====================================================================
-include $(LIBBCC_ROOT_PATH)/libbcc-config.mk
 
 #=====================================================================
 # Related Makefile Paths of LLVM
 #=====================================================================
 include $(LLVM_ROOT_PATH)/llvm.mk
-
-#=====================================================================
-# Related Makefile Paths of MCLinker
-#=====================================================================
-include $(MCLD_ROOT_PATH)/mcld.mk

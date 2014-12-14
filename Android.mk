@@ -21,73 +21,29 @@ LOCAL_PATH := $(call my-dir)
 LIBBCC_ROOT_PATH := $(LOCAL_PATH)
 include $(LIBBCC_ROOT_PATH)/libbcc.mk
 
+include frameworks/compile/slang/rs_version.mk
+
 #=====================================================================
 # Whole Static Library to Be Linked In
 #=====================================================================
 
 libbcc_WHOLE_STATIC_LIBRARIES += \
-  libbccAndroidBitcode \
   libbccRenderscript \
   libbccExecutionEngine \
   libbccCore \
   libbccSupport
 
-libmcld_STATIC_LIBRARIES += \
-  libmcldCodeGen \
-  libmcldTarget \
-  libmcldLDVariant \
-  libmcldMC \
-  libmcldObject \
-  libmcldFragment \
-  libmcldCore \
-  libmcldSupport \
-  libmcldADT \
-  libmcldLD
-
-#=====================================================================
-# Calculate SHA1 checksum for libbcc.so, libRS.so and libclcore.bc
-#=====================================================================
-
-include $(CLEAR_VARS)
-
-LOCAL_MODULE := libbcc.sha1
-LOCAL_MODULE_TAGS := optional
-LOCAL_MODULE_CLASS := SHARED_LIBRARIES
-
-libbcc_SHA1_SRCS := \
-  $(TARGET_OUT_INTERMEDIATE_LIBRARIES)/libbcc.so \
-  $(TARGET_OUT_INTERMEDIATE_LIBRARIES)/libcompiler_rt.so \
-  $(TARGET_OUT_INTERMEDIATE_LIBRARIES)/libRS.so \
-  $(call intermediates-dir-for,SHARED_LIBRARIES,libclcore.bc,,)/libclcore.bc \
-  $(call intermediates-dir-for,SHARED_LIBRARIES,libclcore_debug.bc,,)/libclcore_debug.bc
-
-ifeq ($(ARCH_ARM_HAVE_NEON),true)
-  # Disable NEON on cortex-a15 temporarily
-  ifneq ($(strip $(TARGET_CPU_VARIANT)), cortex-a15)
-    libbcc_SHA1_SRCS += \
-      $(call intermediates-dir-for,SHARED_LIBRARIES,libclcore_neon.bc,,)/libclcore_neon.bc
-  endif
-endif
-
-libbcc_GEN_SHA1_STAMP := $(LOCAL_PATH)/tools/build/gen-sha1-stamp.py
-intermediates := $(call local-intermediates-dir)
-
-libbcc_SHA1_ASM := $(intermediates)/libbcc.sha1.S
-LOCAL_GENERATED_SOURCES += $(libbcc_SHA1_ASM)
-$(libbcc_SHA1_ASM): PRIVATE_SHA1_SRCS := $(libbcc_SHA1_SRCS)
-$(libbcc_SHA1_ASM): $(libbcc_SHA1_SRCS) $(libbcc_GEN_SHA1_STAMP)
-	@echo libbcc.sha1: $@
-	$(hide) mkdir -p $(dir $@)
-	$(hide) $(libbcc_GEN_SHA1_STAMP) $(PRIVATE_SHA1_SRCS) > $@
-
-LOCAL_CFLAGS += -D_REENTRANT -DPIC -fPIC
-LOCAL_CFLAGS += -O3 -nodefaultlibs -nostdlib
-
-include $(BUILD_SHARED_LIBRARY)
-
 #=====================================================================
 # Device Shared Library libbcc
 #=====================================================================
+ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
+ifeq ($(TARGET_ARCH),arm64)
+$(info TODOArm64: $(LOCAL_PATH)/Android.mk Enable libbcc build)
+endif
+
+ifeq ($(TARGET_ARCH),mips64)
+$(info TODOMips64: $(LOCAL_PATH)/Android.mk Enable libbcc build)
+endif
 
 ifneq (,)  # skip device variant to avoid contaminating REQUIRED_MODULES
 
@@ -101,49 +57,23 @@ LOCAL_WHOLE_STATIC_LIBRARIES := $(libbcc_WHOLE_STATIC_LIBRARIES)
 
 LOCAL_WHOLE_STATIC_LIBRARIES += librsloader
 
-ifeq ($(TARGET_ARCH),arm)
-  LOCAL_WHOLE_STATIC_LIBRARIES += \
-    libmcldARMTarget \
-    libmcldARMInfo
-else
-  ifeq ($(TARGET_ARCH), mips)
-    LOCAL_WHOLE_STATIC_LIBRARIES += \
-      libmcldMipsTarget \
-      libmcldMipsInfo
-  else
-    ifeq ($(TARGET_ARCH),x86) # We don't support x86-64 right now
-      LOCAL_WHOLE_STATIC_LIBRARIES += \
-        libmcldX86Target \
-        libmcldX86Info
-    else
-      $(error Unsupported TARGET_ARCH $(TARGET_ARCH))
-    endif
-  endif
-endif
-
-LOCAL_WHOLE_STATIC_LIBRARIES += $(libmcld_STATIC_LIBRARIES)
-LOCAL_SHARED_LIBRARIES := libbcinfo libLLVM libdl libutils libcutils liblog libstlport
+LOCAL_SHARED_LIBRARIES := libbcinfo libLLVM libdl libutils libcutils liblog libc++
 
 # Modules that need get installed if and only if the target libbcc.so is
 # installed.
-LOCAL_REQUIRED_MODULES := libclcore.bc libclcore_debug.bc libbcc.sha1 libcompiler_rt
+LOCAL_REQUIRED_MODULES := libclcore.bc libclcore_debug.bc libcompiler_rt
 
-ifeq ($(ARCH_X86_HAVE_SSE2),true)
-LOCAL_REQUIRED_MODULES += libclcore_x86.bc
-endif
+LOCAL_REQUIRED_MODULES_x86 += libclcore_x86.bc
+LOCAL_REQUIRED_MODULES_x86_64 += libclcore_x86.bc
 
 ifeq ($(ARCH_ARM_HAVE_NEON),true)
-  # Disable NEON on cortex-a15 temporarily
-  ifneq ($(strip $(TARGET_CPU_VARIANT)), cortex-a15)
-    LOCAL_REQUIRED_MODULES += libclcore_neon.bc
-  endif
+  LOCAL_REQUIRED_MODULES_arm += libclcore_neon.bc
 endif
 
-# Generate build information (Build time + Build git revision + Build Semi SHA1)
-include $(LIBBCC_ROOT_PATH)/libbcc-gen-build-info.mk
-
 include $(LIBBCC_DEVICE_BUILD_MK)
+include $(LLVM_DEVICE_BUILD_MK)
 include $(BUILD_SHARED_LIBRARY)
+endif
 
 endif
 
@@ -158,19 +88,13 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 LOCAL_IS_HOST_MODULE := true
 
+ifneq ($(HOST_OS),windows)
+LOCAL_CLANG := true
+endif
+
 LOCAL_WHOLE_STATIC_LIBRARIES += $(libbcc_WHOLE_STATIC_LIBRARIES)
 
 LOCAL_WHOLE_STATIC_LIBRARIES += librsloader
-
-LOCAL_WHOLE_STATIC_LIBRARIES += \
-  libmcldARMTarget \
-  libmcldARMInfo \
-  libmcldMipsTarget \
-  libmcldMipsInfo \
-  libmcldX86Target \
-  libmcldX86Info
-
-LOCAL_WHOLE_STATIC_LIBRARIES += $(libmcld_STATIC_LIBRARIES)
 
 LOCAL_STATIC_LIBRARIES += \
   libutils \
@@ -179,12 +103,12 @@ LOCAL_STATIC_LIBRARIES += \
 
 LOCAL_SHARED_LIBRARIES := libbcinfo libLLVM
 
+ifndef USE_MINGW
 LOCAL_LDLIBS := -ldl -lpthread
-
-# Generate build information (Build time + Build git revision + Build Semi SHA1)
-include $(LIBBCC_ROOT_PATH)/libbcc-gen-build-info.mk
+endif
 
 include $(LIBBCC_HOST_BUILD_MK)
+include $(LLVM_HOST_BUILD_MK)
 include $(BUILD_HOST_SHARED_LIBRARY)
 
 endif # Don't build in unbundled branches

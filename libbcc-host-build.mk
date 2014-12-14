@@ -14,11 +14,16 @@
 # limitations under the License.
 #
 
+ifneq ($(HOST_OS),windows)
+LOCAL_CLANG := true
+endif
+
 LOCAL_CFLAGS := \
   -Wall \
   -Wno-unused-parameter \
   -Werror \
   -D__HOST__ \
+  $(RS_VERSION_DEFINE) \
   $(LOCAL_CFLAGS)
 
 ifeq ($(TARGET_BUILD_VARIANT),eng)
@@ -29,6 +34,10 @@ endif
 
 LOCAL_C_INCLUDES := \
   $(LIBBCC_ROOT_PATH)/include \
+  $(LLVM_ROOT_PATH)/include \
+  $(LLVM_ROOT_PATH)/host/include \
   $(LOCAL_C_INCLUDES)
 
 LOCAL_IS_HOST_MODULE := true
+
+LOCAL_32_BIT_ONLY := true

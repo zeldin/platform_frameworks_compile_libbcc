@@ -16,7 +16,33 @@
 
 #include "bcc/ExecutionEngine/SymbolResolvers.h"
 
+#if !defined(_WIN32)  /* TODO create a HAVE_DLFCN_H */
 #include <dlfcn.h>
+#else
+/* TODO hack: definitions from bionic/libc/include/dlfcn.h */
+void* dlopen(const char*  filename, int flag) {
+  return nullptr;
+}
+
+int dlclose(void*  handle) {
+  return -1;
+}
+
+const char* dlerror(void) {
+  return "Unspecified error!";
+}
+
+void* dlsym(void*  handle, const char*  symbol) {
+  return nullptr;
+}
+
+#define RTLD_NOW    0
+#define RTLD_LAZY   1
+#define RTLD_LOCAL  0
+#define RTLD_GLOBAL 2
+#define RTLD_DEFAULT  ((void*) 0xffffffff)
+#define RTLD_NEXT     ((void*) 0xfffffffe)
+#endif
 
 #include <cassert>
 #include <cstdio>
@@ -28,7 +54,7 @@ using namespace bcc;
 // DyldSymbolResolver
 //===----------------------------------------------------------------------===//
 DyldSymbolResolver::DyldSymbolResolver(const char *pFileName,
-                                       bool pLazyBinding) : mError(NULL) {
+                                       bool pLazyBinding) : mError(nullptr) {
   int flags = (pLazyBinding) ? RTLD_LAZY : RTLD_NOW;
 
   // Make the symbol within the given library to be local such that it won't
@@ -36,31 +62,34 @@ DyldSymbolResolver::DyldSymbolResolver(const char *pFileName,
   flags |= RTLD_LOCAL;
 
   mHandle = ::dlopen(pFileName, flags);
-  if (mHandle == NULL) {
+  if (mHandle == nullptr) {
     const char *err = ::dlerror();
 
 #define DYLD_ERROR_MSG_PATTERN  "Failed to load %s! (%s)"
     size_t error_length = ::strlen(DYLD_ERROR_MSG_PATTERN) +
                           ::strlen(pFileName) + 1;
-    if (err != NULL) {
+    if (err != nullptr) {
       error_length += ::strlen(err);
     }
 
     mError = new (std::nothrow) char [error_length];
-    if (mError != NULL) {
+    if (mError != nullptr) {
       ::snprintf(mError, error_length, DYLD_ERROR_MSG_PATTERN, pFileName,
-                 ((err != NULL) ? err : ""));
+                 ((err != nullptr) ? err : ""));
     }
   }
 #undef DYLD_ERROR_MSG_PATTERN
 }
 
 void *DyldSymbolResolver::getAddress(const char *pName) {
-  assert((mHandle != NULL) && "Invalid DyldSymbolResolver!");
+  assert((mHandle != nullptr) && "Invalid DyldSymbolResolver!");
   return ::dlsym(mHandle, pName);
 }
 
 DyldSymbolResolver::~DyldSymbolResolver() {
-  ::dlclose(mHandle);
+  if (mHandle != nullptr) {
+    ::dlclose(mHandle);
+    mHandle = nullptr;
+  }
   delete [] mError;
 }
