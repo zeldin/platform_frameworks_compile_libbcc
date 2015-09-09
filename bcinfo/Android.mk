@@ -14,9 +14,6 @@
 # limitations under the License.
 #
 
-# Don't build for unbundled branches
-ifeq (,$(TARGET_BUILD_APPS))
-
 local_cflags_for_libbcinfo := -Wall -Wno-unused-parameter -Werror
 ifneq ($(TARGET_BUILD_VARIANT),eng)
 local_cflags_for_libbcinfo += -D__DISABLE_ASSERTS
@@ -34,6 +31,7 @@ libbcinfo_SRC_FILES := \
 
 libbcinfo_C_INCLUDES := \
   $(LOCAL_PATH)/../include \
+  $(RS_ROOT_PATH) \
   $(LOCAL_PATH)/../../slang
 
 libbcinfo_STATIC_LIBRARIES := \
@@ -43,14 +41,6 @@ libbcinfo_STATIC_LIBRARIES := \
   libLLVMBitWriter_3_2
 
 LLVM_ROOT_PATH := external/llvm
-
-ifeq ($(TARGET_ARCH),arm64)
-$(info TODOArm64: $(LOCAL_PATH)/Android.mk Enable build of libbcinfo device shared library)
-endif
-
-ifeq ($(TARGET_ARCH),mips64)
-$(info TODOMips64: $(LOCAL_PATH)/Android.mk Enable build of libbcinfo device shared library)
-endif
 
 ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
 include $(CLEAR_VARS)
@@ -72,6 +62,9 @@ include $(LLVM_ROOT_PATH)/llvm-device-build.mk
 include $(BUILD_SHARED_LIBRARY)
 endif
 
+# Don't build for unbundled branches
+ifeq (,$(TARGET_BUILD_APPS))
+
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := libbcinfo
@@ -87,10 +80,15 @@ LOCAL_C_INCLUDES := $(libbcinfo_C_INCLUDES)
 
 LOCAL_STATIC_LIBRARIES += $(libbcinfo_STATIC_LIBRARIES)
 LOCAL_STATIC_LIBRARIES += libcutils liblog
-LOCAL_SHARED_LIBRARIES += libLLVM
 
 ifndef USE_MINGW
 LOCAL_LDLIBS := -ldl -lpthread
+endif
+
+include $(LOCAL_PATH)/../llvm-loadable-libbcc.mk
+
+ifneq ($(CAN_BUILD_HOST_LLVM_LOADABLE_MODULE),true)
+LOCAL_SHARED_LIBRARIES += libLLVM
 endif
 
 include $(LLVM_ROOT_PATH)/llvm-host-build.mk

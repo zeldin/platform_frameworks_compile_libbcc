@@ -121,19 +121,19 @@ static int dumpInfo(bcinfo::MetadataExtractor *ME) {
     return 2;
   }
 
-  fprintf(info, "exportVarCount: %u\n", ME->getExportVarCount());
+  fprintf(info, "exportVarCount: %zu\n", ME->getExportVarCount());
   const char **varNameList = ME->getExportVarNameList();
   for (size_t i = 0; i < ME->getExportVarCount(); i++) {
     fprintf(info, "%s\n", varNameList[i]);
   }
 
-  fprintf(info, "exportFuncCount: %u\n", ME->getExportFuncCount());
+  fprintf(info, "exportFuncCount: %zu\n", ME->getExportFuncCount());
   const char **funcNameList = ME->getExportFuncNameList();
   for (size_t i = 0; i < ME->getExportFuncCount(); i++) {
     fprintf(info, "%s\n", funcNameList[i]);
   }
 
-  fprintf(info, "exportForEachCount: %u\n",
+  fprintf(info, "exportForEachCount: %zu\n",
           ME->getExportForEachSignatureCount());
   const char **nameList = ME->getExportForEachNameList();
   const uint32_t *sigList = ME->getExportForEachSignatureList();
@@ -143,7 +143,13 @@ static int dumpInfo(bcinfo::MetadataExtractor *ME) {
             inputCountList[i]);
   }
 
-  fprintf(info, "objectSlotCount: %u\n", ME->getObjectSlotCount());
+  fprintf(info, "exportReduceCount: %zu\n", ME->getExportReduceCount());
+  const char **reduceNameList = ME->getExportReduceNameList();
+  for (size_t i = 0; i < ME->getExportReduceCount(); i++) {
+    fprintf(info, "%s\n", reduceNameList[i]);
+  }
+
+  fprintf(info, "objectSlotCount: %zu\n", ME->getObjectSlotCount());
   const uint32_t *slotList = ME->getObjectSlotList();
   for (size_t i = 0; i < ME->getObjectSlotCount(); i++) {
     fprintf(info, "%u\n", slotList[i]);
@@ -172,43 +178,50 @@ static void dumpMetadata(bcinfo::MetadataExtractor *ME) {
     break;
   }
 
-  printf("exportVarCount: %u\n", ME->getExportVarCount());
+  printf("exportVarCount: %zu\n", ME->getExportVarCount());
   const char **varNameList = ME->getExportVarNameList();
   for (size_t i = 0; i < ME->getExportVarCount(); i++) {
-    printf("var[%u]: %s\n", i, varNameList[i]);
+    printf("var[%zu]: %s\n", i, varNameList[i]);
   }
   printf("\n");
 
-  printf("exportFuncCount: %u\n", ME->getExportFuncCount());
+  printf("exportFuncCount: %zu\n", ME->getExportFuncCount());
   const char **funcNameList = ME->getExportFuncNameList();
   for (size_t i = 0; i < ME->getExportFuncCount(); i++) {
-    printf("func[%u]: %s\n", i, funcNameList[i]);
+    printf("func[%zu]: %s\n", i, funcNameList[i]);
   }
   printf("\n");
 
-  printf("exportForEachSignatureCount: %u\n",
+  printf("exportForEachSignatureCount: %zu\n",
          ME->getExportForEachSignatureCount());
   const char **nameList = ME->getExportForEachNameList();
   const uint32_t *sigList = ME->getExportForEachSignatureList();
   const uint32_t *inputCountList = ME->getExportForEachInputCountList();
   for (size_t i = 0; i < ME->getExportForEachSignatureCount(); i++) {
-    printf("exportForEachSignatureList[%u]: %s - %u - %u\n", i, nameList[i],
+    printf("exportForEachSignatureList[%zu]: %s - 0x%08x - %u\n", i, nameList[i],
            sigList[i], inputCountList[i]);
   }
   printf("\n");
 
-  printf("pragmaCount: %u\n", ME->getPragmaCount());
-  const char **keyList = ME->getPragmaKeyList();
-  const char **valueList = ME->getPragmaValueList();
-  for (size_t i = 0; i < ME->getPragmaCount(); i++) {
-    printf("pragma[%u]: %s - %s\n", i, keyList[i], valueList[i]);
+  printf("exportReduceCount: %zu\n", ME->getExportReduceCount());
+  const char **reduceNameList = ME->getExportReduceNameList();
+  for (size_t i = 0; i < ME->getExportReduceCount(); i++) {
+    printf("func[%zu]: %s\n", i, reduceNameList[i]);
   }
   printf("\n");
 
-  printf("objectSlotCount: %u\n", ME->getObjectSlotCount());
+  printf("pragmaCount: %zu\n", ME->getPragmaCount());
+  const char **keyList = ME->getPragmaKeyList();
+  const char **valueList = ME->getPragmaValueList();
+  for (size_t i = 0; i < ME->getPragmaCount(); i++) {
+    printf("pragma[%zu]: %s - %s\n", i, keyList[i], valueList[i]);
+  }
+  printf("\n");
+
+  printf("objectSlotCount: %zu\n", ME->getObjectSlotCount());
   const uint32_t *slotList = ME->getObjectSlotList();
   for (size_t i = 0; i < ME->getObjectSlotCount(); i++) {
-    printf("objectSlotList[%u]: %u\n", i, slotList[i]);
+    printf("objectSlotList[%zu]: %u\n", i, slotList[i]);
   }
   printf("\n");
 
@@ -314,12 +327,12 @@ int main(int argc, char** argv) {
 
     std::unique_ptr<llvm::MemoryBuffer> mem;
 
-    mem.reset(llvm::MemoryBuffer::getMemBuffer(
+    mem = llvm::MemoryBuffer::getMemBuffer(
         llvm::StringRef(translatedBitcode, translatedBitcodeSize),
-        inFile.c_str(), false));
+        inFile.c_str(), false);
 
     std::unique_ptr<llvm::Module> module;
-    llvm::ErrorOr<llvm::Module*> moduleOrError = llvm::parseBitcodeFile(mem.get(), ctx);
+    llvm::ErrorOr<llvm::Module*> moduleOrError = llvm::parseBitcodeFile(mem.get()->getMemBufferRef(), ctx);
     std::error_code ec = moduleOrError.getError();
     if (!ec) {
         module.reset(moduleOrError.get());
@@ -338,7 +351,7 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<llvm::tool_output_file> tof(
-        new llvm::tool_output_file(outFile.c_str(), errmsg,
+        new llvm::tool_output_file(outFile.c_str(), ec,
                                    llvm::sys::fs::F_None));
     std::unique_ptr<llvm::AssemblyAnnotationWriter> ann;
     module->print(tof->os(), ann.get());

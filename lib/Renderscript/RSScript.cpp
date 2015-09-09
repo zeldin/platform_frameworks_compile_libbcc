@@ -17,9 +17,9 @@
 #include "bcc/Renderscript/RSScript.h"
 
 #include "bcc/Assert.h"
-#include "bcc/Renderscript/RSInfo.h"
 #include "bcc/Source.h"
 #include "bcc/Support/Log.h"
+#include "bcc/Support/CompilerConfig.h"
 
 using namespace bcc;
 
@@ -40,8 +40,7 @@ bool RSScript::LinkRuntime(RSScript &pScript, const char *core_lib) {
         &pScript.getSource().getModule(), &libclcore_source->getModule());
   }
 
-  if (!pScript.getSource().merge(*libclcore_source,
-                                 /* pPreserveSource */false)) {
+  if (!pScript.getSource().merge(*libclcore_source)) {
     ALOGE("Failed to link Renderscript library '%s'!", core_lib);
     delete libclcore_source;
     return false;
@@ -51,12 +50,26 @@ bool RSScript::LinkRuntime(RSScript &pScript, const char *core_lib) {
 }
 
 RSScript::RSScript(Source &pSource)
-  : Script(pSource), mInfo(nullptr), mCompilerVersion(0),
+  : Script(pSource), mCompilerVersion(0),
     mOptimizationLevel(kOptLvl3), mLinkRuntimeCallback(nullptr),
-    mEmbedInfo(false) { }
+    mEmbedInfo(false), mEmbedGlobalInfo(false),
+    mEmbedGlobalInfoSkipConstant(false) { }
+
+RSScript::RSScript(Source &pSource, const CompilerConfig * pCompilerConfig): RSScript(pSource)
+{
+  switch (pCompilerConfig->getOptimizationLevel()) {
+    case llvm::CodeGenOpt::None:    mOptimizationLevel = kOptLvl0; break;
+    case llvm::CodeGenOpt::Less:    mOptimizationLevel = kOptLvl1; break;
+    case llvm::CodeGenOpt::Default: mOptimizationLevel = kOptLvl2; break;
+    case llvm::CodeGenOpt::Aggressive: //Intentional fallthrough
+    default: {
+      mOptimizationLevel = kOptLvl3;
+      break;
+    }
+  }
+}
 
 bool RSScript::doReset() {
-  mInfo = nullptr;
   mCompilerVersion = 0;
   mOptimizationLevel = kOptLvl3;
   return true;

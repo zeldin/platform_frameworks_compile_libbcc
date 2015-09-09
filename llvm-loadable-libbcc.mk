@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2012 The Android Open Source Project
+# Copyright (C) 2015 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,29 +14,18 @@
 # limitations under the License.
 #
 
-ifneq ($(HOST_OS),windows)
-LOCAL_CLANG := true
+# Checks whether libbcc can be built as an LLVM loadable module on the
+# host.
+CAN_BUILD_HOST_LLVM_LOADABLE_MODULE := true
+
+ifdef USE_MINGW
+CAN_BUILD_HOST_LLVM_LOADABLE_MODULE := false
 endif
 
-LOCAL_CFLAGS := \
-  -Wall \
-  -Wno-unused-parameter \
-  -Werror \
-  -D__HOST__ \
-  $(RS_VERSION_DEFINE) \
-  $(LOCAL_CFLAGS)
-
-ifeq ($(TARGET_BUILD_VARIANT),eng)
-libbcc_CFLAGS += -DANDROID_ENGINEERING_BUILD
-else
-LOCAL_CFLAGS += -D__DISABLE_ASSERTS
+ifeq ($(HOST_OS),darwin)
+CAN_BUILD_HOST_LLVM_LOADABLE_MODULE := false
 endif
 
-LOCAL_C_INCLUDES := \
-  $(LIBBCC_ROOT_PATH)/include \
-  $(RS_ROOT_PATH) \
-  $(LLVM_ROOT_PATH)/include \
-  $(LLVM_ROOT_PATH)/host/include \
-  $(LOCAL_C_INCLUDES)
-
-LOCAL_IS_HOST_MODULE := true
+ifneq ($(FORCE_BUILD_LLVM_COMPONENTS),true)
+CAN_BUILD_HOST_LLVM_LOADABLE_MODULE := false
+endif

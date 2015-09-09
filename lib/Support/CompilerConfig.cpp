@@ -27,6 +27,26 @@
 
 using namespace bcc;
 
+#if defined (PROVIDE_X86_CODEGEN) && !defined(__HOST__)
+
+namespace {
+
+// Utility function to test for f16c feature.  This function is only needed for
+// on-device bcc for x86
+bool HasF16C() {
+  llvm::StringMap<bool> features;
+  if (!llvm::sys::getHostCPUFeatures(features))
+    return false;
+
+  if (features.count("f16c") && features["f16c"])
+    return true;
+  else
+    return false;
+}
+
+}
+#endif // (PROVIDE_X86_CODEGEN) && !defined(__HOST__)
+
 CompilerConfig::CompilerConfig(const std::string &pTriple)
   : mTriple(pTriple), mFullPrecision(true), mTarget(nullptr) {
   //===--------------------------------------------------------------------===//
@@ -37,18 +57,11 @@ CompilerConfig::CompilerConfig(const std::string &pTriple)
   //===--------------------------------------------------------------------===//
   // Default setting of target options
   //===--------------------------------------------------------------------===//
-  // Use hardfloat ABI by default.
-  //
-  // TODO(all): Need to detect the CPU capability and decide whether to use
-  // softfp. To use softfp, change the following 2 lines to
-  //
-  // options.FloatABIType = llvm::FloatABI::Soft;
-  // options.UseSoftFloat = true;
-  mTargetOpts.FloatABIType = llvm::FloatABI::Soft;
-  mTargetOpts.UseSoftFloat = false;
 
-  // Enable frame pointer elimination optimization by default.
-  mTargetOpts.NoFramePointerElim = false;
+  // Use soft-float ABI.  This only selects the ABI (and is applicable only to
+  // ARM targets).  Codegen still uses hardware FPU by default.  To use software
+  // floating point, add 'soft-float' feature to mFeatureString below.
+  mTargetOpts.FloatABIType = llvm::FloatABI::Soft;
 
   //===--------------------------------------------------------------------===//
   // Default setting for code model
@@ -131,11 +144,27 @@ bool CompilerConfig::initializeArch() {
         attributes.push_back("+hwdiv");
     }
 
+    // Enable fp16 attribute if available in the feature list.  This feature
+    // will not be added in the host version of bcc or bcc_compat since
+    // 'features' would correspond to features in an x86 host.
+    if (features.count("fp16") && features["fp16"])
+      attributes.push_back("+fp16");
+
     setFeatureString(attributes);
 
 #if defined(TARGET_BUILD)
     if (!getProperty("debug.rs.arm-no-tune-for-cpu")) {
+#ifndef FORCE_CPU_VARIANT_32
+#ifdef DEFAULT_ARM_CODEGEN
       setCPU(llvm::sys::getHostCPUName());
+#endif
+#else
+#define XSTR(S) #S
+#define STR(S) XSTR(S)
+      setCPU(STR(FORCE_CPU_VARIANT_32));
+#undef STR
+#undef XSTR
+#endif
     }
 #endif  // TARGET_BUILD
 
@@ -147,7 +176,18 @@ bool CompilerConfig::initializeArch() {
   case llvm::Triple::aarch64:
 #if defined(TARGET_BUILD)
     if (!getProperty("debug.rs.arm-no-tune-for-cpu")) {
+#ifndef FORCE_CPU_VARIANT_64
+#ifdef DEFAULT_ARM64_CODEGEN
       setCPU(llvm::sys::getHostCPUName());
+#endif
+#else
+#define XSTR(S) #S
+#define STR(S) XSTR(S)
+      setCPU(STR(FORCE_CPU_VARIANT_64));
+#undef STR
+#undef XSTR
+#endif
+
     }
 #endif  // TARGET_BUILD
     break;
@@ -165,23 +205,42 @@ bool CompilerConfig::initializeArch() {
 #if defined (PROVIDE_MIPS64_CODEGEN)
   case llvm::Triple::mips64:
   case llvm::Triple::mips64el:
+    // Default revision for MIPS64 Android is R6.
+    setCPU("mips64r6");
     break;
 #endif // PROVIDE_MIPS64_CODEGEN
 
 #if defined (PROVIDE_X86_CODEGEN)
   case llvm::Triple::x86:
-    // Disable frame pointer elimination optimization on x86 family.
-    getTargetOptions().NoFramePointerElim = true;
     getTargetOptions().UseInitArray = true;
+
+#ifndef __HOST__
+    // If not running on the host, and f16c is available, set it in the feature
+    // string
+    if (HasF16C())
+      mFeatureString = "+f16c";
+#endif // __HOST__
+
     break;
 #endif  // PROVIDE_X86_CODEGEN
 
 #if defined (PROVIDE_X86_CODEGEN)
   case llvm::Triple::x86_64:
-    setCodeModel(llvm::CodeModel::Medium);
-    // Disable frame pointer elimination optimization on x86 family.
-    getTargetOptions().NoFramePointerElim = true;
+    // x86_64 needs small CodeModel if use PIC_ reloc, or else dlopen failed with TEXTREL.
+    if (getRelocationModel() == llvm::Reloc::PIC_) {
+      setCodeModel(llvm::CodeModel::Small);
+    } else {
+      setCodeModel(llvm::CodeModel::Medium);
+    }
     getTargetOptions().UseInitArray = true;
+
+#ifndef __HOST__
+    // If not running on the host, and f16c is available, set it in the feature
+    // string
+    if (HasF16C())
+      mFeatureString = "+f16c";
+#endif // __HOST__
+
     break;
 #endif  // PROVIDE_X86_CODEGEN
 

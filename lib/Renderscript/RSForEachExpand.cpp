@@ -18,6 +18,7 @@
 #include "bcc/Renderscript/RSTransforms.h"
 
 #include <cstdlib>
+#include <functional>
 
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
@@ -54,18 +55,46 @@ static const bool gEnableRsTbaa = true;
  * still generate code for the original function.
  */
 class RSForEachExpandPass : public llvm::ModulePass {
-private:
+public:
   static char ID;
+
+private:
+  static const size_t RS_KERNEL_INPUT_LIMIT = 8; // see frameworks/base/libs/rs/cpu_ref/rsCpuCoreRuntime.h
+
+  enum RsLaunchDimensionsField {
+    RsLaunchDimensionsFieldX,
+    RsLaunchDimensionsFieldY,
+    RsLaunchDimensionsFieldZ,
+    RsLaunchDimensionsFieldLod,
+    RsLaunchDimensionsFieldFace,
+    RsLaunchDimensionsFieldArray,
+
+    RsLaunchDimensionsFieldCount
+  };
+
+  enum RsExpandKernelDriverInfoPfxField {
+    RsExpandKernelDriverInfoPfxFieldInPtr,
+    RsExpandKernelDriverInfoPfxFieldInStride,
+    RsExpandKernelDriverInfoPfxFieldInLen,
+    RsExpandKernelDriverInfoPfxFieldOutPtr,
+    RsExpandKernelDriverInfoPfxFieldOutStride,
+    RsExpandKernelDriverInfoPfxFieldOutLen,
+    RsExpandKernelDriverInfoPfxFieldDim,
+    RsExpandKernelDriverInfoPfxFieldCurrent,
+    RsExpandKernelDriverInfoPfxFieldUsr,
+    RsExpandKernelDriverInfoPfxFieldUsLenr,
+
+    RsExpandKernelDriverInfoPfxFieldCount
+  };
 
   llvm::Module *Module;
   llvm::LLVMContext *Context;
 
   /*
-   * Pointer to LLVM type information for the ForEachStubType and the function
-   * signature for expanded kernels.  These must be re-calculated for each
+   * Pointer to LLVM type information for the the function signature
+   * for expanded kernels.  This must be re-calculated for each
    * module the pass is run on.
    */
-  llvm::StructType   *ForEachStubType;
   llvm::FunctionType *ExpandedFunctionType;
 
   uint32_t mExportForEachCount;
@@ -104,10 +133,9 @@ private:
     // hard-coded to look at only the first such function.
     llvm::MDNode *SigNode = ExportForEachMetadata->getOperand(0);
     if (SigNode != nullptr && SigNode->getNumOperands() == 1) {
-      llvm::Value *SigVal = SigNode->getOperand(0);
-      if (SigVal->getValueID() == llvm::Value::MDStringVal) {
-        llvm::StringRef SigString =
-            static_cast<llvm::MDString*>(SigVal)->getString();
+      llvm::Metadata *SigMD = SigNode->getOperand(0);
+      if (llvm::MDString *SigS = llvm::dyn_cast<llvm::MDString>(SigMD)) {
+        llvm::StringRef SigString = SigS->getString();
         uint32_t Signature = 0;
         if (SigString.getAsInteger(10, Signature)) {
           ALOGE("Non-integer signature value '%s'", SigString.str().c_str());
@@ -118,6 +146,43 @@ private:
     }
 
     return 0;
+  }
+
+  bool isStepOptSupported(llvm::Type *AllocType) {
+
+    llvm::PointerType *PT = llvm::dyn_cast<llvm::PointerType>(AllocType);
+    llvm::Type *VoidPtrTy = llvm::Type::getInt8PtrTy(*Context);
+
+    if (mEnableStepOpt) {
+      return false;
+    }
+
+    if (AllocType == VoidPtrTy) {
+      return false;
+    }
+
+    if (!PT) {
+      return false;
+    }
+
+    // remaining conditions are 64-bit only
+    if (VoidPtrTy->getPrimitiveSizeInBits() == 32) {
+      return true;
+    }
+
+    // coerce suggests an upconverted struct type, which we can't support
+    if (AllocType->getStructName().find("coerce") != llvm::StringRef::npos) {
+      return false;
+    }
+
+    // 2xi64 and i128 suggest an upconverted struct type, which are also unsupported
+    llvm::Type *V2xi64Ty = llvm::VectorType::get(llvm::Type::getInt64Ty(*Context), 2);
+    llvm::Type *Int128Ty = llvm::Type::getIntNTy(*Context, 128);
+    if (AllocType == V2xi64Ty || AllocType == Int128Ty) {
+      return false;
+    }
+
+    return true;
   }
 
   // Get the actual value we should use to step through an allocation.
@@ -136,8 +201,7 @@ private:
     bccAssert(AllocType);
     bccAssert(OrigStep);
     llvm::PointerType *PT = llvm::dyn_cast<llvm::PointerType>(AllocType);
-    llvm::Type *VoidPtrTy = llvm::Type::getInt8PtrTy(*Context);
-    if (mEnableStepOpt && AllocType != VoidPtrTy && PT) {
+    if (isStepOptSupported(AllocType)) {
       llvm::Type *ET = PT->getElementType();
       uint64_t ETSize = DL->getTypeAllocSize(ET);
       llvm::Type *Int32Ty = llvm::Type::getInt32Ty(*Context);
@@ -147,69 +211,89 @@ private:
     }
   }
 
-#define PARAM_FIELD_INS         0
-#define PARAM_FIELD_INESTRIDES  1
-#define PARAM_FIELD_OUT         2
-#define PARAM_FIELD_Y           3
-#define PARAM_FIELD_Z           4
-#define PARAM_FIELD_LID         5
-#define PARAM_FIELD_USR         6
-#define PARAM_FIELD_DIMX        7
-#define PARAM_FIELD_DIMY        8
-#define PARAM_FIELD_DIMZ        9
-#define PARAM_FIELD_SLOT       10
-
   /// Builds the types required by the pass for the given context.
   void buildTypes(void) {
-    // Create the RsForEachStubParam struct.
+    // Create the RsLaunchDimensionsTy and RsExpandKernelDriverInfoPfxTy structs.
 
-    llvm::Type *VoidPtrTy    = llvm::Type::getInt8PtrTy(*Context);
-    llvm::Type *VoidPtrPtrTy = VoidPtrTy->getPointerTo();
-    llvm::Type *Int32Ty      = llvm::Type::getInt32Ty(*Context);
-    llvm::Type *Int32PtrTy   = Int32Ty->getPointerTo();
+    llvm::Type *Int8Ty                   = llvm::Type::getInt8Ty(*Context);
+    llvm::Type *Int8PtrTy                = Int8Ty->getPointerTo();
+    llvm::Type *Int8PtrArrayInputLimitTy = llvm::ArrayType::get(Int8PtrTy, RS_KERNEL_INPUT_LIMIT);
+    llvm::Type *Int32Ty                  = llvm::Type::getInt32Ty(*Context);
+    llvm::Type *Int32ArrayInputLimitTy   = llvm::ArrayType::get(Int32Ty, RS_KERNEL_INPUT_LIMIT);
+    llvm::Type *VoidPtrTy                = llvm::Type::getInt8PtrTy(*Context);
+    llvm::Type *Int32Array4Ty            = llvm::ArrayType::get(Int32Ty, 4);
 
     /* Defined in frameworks/base/libs/rs/cpu_ref/rsCpuCore.h:
      *
-     * struct RsForEachKernelStruct{
-     *   const void *in;
-     *   void *out;
+     * struct RsLaunchDimensions {
+     *   uint32_t x;
      *   uint32_t y;
      *   uint32_t z;
-     *   uint32_t lid;
-     *   const void **ins;
-     *   uint32_t *inEStrides;
-     *   const void *usr;
-     *   uint32_t dimX;
-     *   uint32_t dimY;
-     *   uint32_t dimZ;
-     *   uint32_t slot;
+     *   uint32_t lod;
+     *   uint32_t face;
+     *   uint32_t array[4];
      * };
      */
-    llvm::SmallVector<llvm::Type*, 12> StructTypes;
-    StructTypes.push_back(VoidPtrPtrTy); // const void **ins
-    StructTypes.push_back(Int32PtrTy);   // uint32_t *inEStrides
-    StructTypes.push_back(VoidPtrTy);    // void *out
-    StructTypes.push_back(Int32Ty);      // uint32_t y
-    StructTypes.push_back(Int32Ty);      // uint32_t z
-    StructTypes.push_back(Int32Ty);      // uint32_t lid
-    StructTypes.push_back(VoidPtrTy);    // const void *usr
-    StructTypes.push_back(Int32Ty);      // uint32_t dimX
-    StructTypes.push_back(Int32Ty);      // uint32_t dimY
-    StructTypes.push_back(Int32Ty);      // uint32_t dimZ
-    StructTypes.push_back(Int32Ty);      // uint32_t slot
+    llvm::SmallVector<llvm::Type*, RsLaunchDimensionsFieldCount> RsLaunchDimensionsTypes;
+    RsLaunchDimensionsTypes.push_back(Int32Ty);       // uint32_t x
+    RsLaunchDimensionsTypes.push_back(Int32Ty);       // uint32_t y
+    RsLaunchDimensionsTypes.push_back(Int32Ty);       // uint32_t z
+    RsLaunchDimensionsTypes.push_back(Int32Ty);       // uint32_t lod
+    RsLaunchDimensionsTypes.push_back(Int32Ty);       // uint32_t face
+    RsLaunchDimensionsTypes.push_back(Int32Array4Ty); // uint32_t array[4]
+    llvm::StructType *RsLaunchDimensionsTy =
+        llvm::StructType::create(RsLaunchDimensionsTypes, "RsLaunchDimensions");
 
-    ForEachStubType =
-      llvm::StructType::create(StructTypes, "RsForEachStubParamStruct");
+    /* Defined as the beginning of RsExpandKernelDriverInfo in frameworks/base/libs/rs/cpu_ref/rsCpuCoreRuntime.h:
+     *
+     * struct RsExpandKernelDriverInfoPfx {
+     *     const uint8_t *inPtr[RS_KERNEL_INPUT_LIMIT];
+     *     uint32_t inStride[RS_KERNEL_INPUT_LIMIT];
+     *     uint32_t inLen;
+     *
+     *     uint8_t *outPtr[RS_KERNEL_INPUT_LIMIT];
+     *     uint32_t outStride[RS_KERNEL_INPUT_LIMIT];
+     *     uint32_t outLen;
+     *
+     *     // Dimension of the launch
+     *     RsLaunchDimensions dim;
+     *
+     *     // The walking iterator of the launch
+     *     RsLaunchDimensions current;
+     *
+     *     const void *usr;
+     *     uint32_t usrLen;
+     *
+     *     // Items below this line are not used by the compiler and can be change in the driver.
+     *     // So the compiler must assume there are an unknown number of fields of unknown type
+     *     // beginning here.
+     * };
+     *
+     * The name "RsExpandKernelDriverInfoPfx" is known to RSInvariantPass (RSInvariant.cpp).
+     */
+    llvm::SmallVector<llvm::Type*, RsExpandKernelDriverInfoPfxFieldCount> RsExpandKernelDriverInfoPfxTypes;
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int8PtrArrayInputLimitTy); // const uint8_t *inPtr[RS_KERNEL_INPUT_LIMIT]
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int32ArrayInputLimitTy);   // uint32_t inStride[RS_KERNEL_INPUT_LIMIT]
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int32Ty);                  // uint32_t inLen
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int8PtrArrayInputLimitTy); // uint8_t *outPtr[RS_KERNEL_INPUT_LIMIT]
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int32ArrayInputLimitTy);   // uint32_t outStride[RS_KERNEL_INPUT_LIMIT]
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int32Ty);                  // uint32_t outLen
+    RsExpandKernelDriverInfoPfxTypes.push_back(RsLaunchDimensionsTy);     // RsLaunchDimensions dim
+    RsExpandKernelDriverInfoPfxTypes.push_back(RsLaunchDimensionsTy);     // RsLaunchDimensions current
+    RsExpandKernelDriverInfoPfxTypes.push_back(VoidPtrTy);                // const void *usr
+    RsExpandKernelDriverInfoPfxTypes.push_back(Int32Ty);                  // uint32_t usrLen
+    llvm::StructType *RsExpandKernelDriverInfoPfxTy =
+        llvm::StructType::create(RsExpandKernelDriverInfoPfxTypes, "RsExpandKernelDriverInfoPfx");
 
     // Create the function type for expanded kernels.
 
-    llvm::Type *ForEachStubPtrTy = ForEachStubType->getPointerTo();
+    llvm::Type *RsExpandKernelDriverInfoPfxPtrTy = RsExpandKernelDriverInfoPfxTy->getPointerTo();
 
     llvm::SmallVector<llvm::Type*, 8> ParamTypes;
-    ParamTypes.push_back(ForEachStubPtrTy); // const RsForEachStubParamStruct *p
-    ParamTypes.push_back(Int32Ty);          // uint32_t x1
-    ParamTypes.push_back(Int32Ty);          // uint32_t x2
-    ParamTypes.push_back(Int32Ty);          // uint32_t outstep
+    ParamTypes.push_back(RsExpandKernelDriverInfoPfxPtrTy); // const RsExpandKernelDriverInfoPfx *p
+    ParamTypes.push_back(Int32Ty);                          // uint32_t x1
+    ParamTypes.push_back(Int32Ty);                          // uint32_t x2
+    ParamTypes.push_back(Int32Ty);                          // uint32_t outstep
 
     ExpandedFunctionType =
         llvm::FunctionType::get(llvm::Type::getVoidTy(*Context), ParamTypes,
@@ -267,14 +351,14 @@ private:
                                llvm::Value *LowerBound,
                                llvm::Value *UpperBound,
                                llvm::PHINode **LoopIV) {
-    assert(LowerBound->getType() == UpperBound->getType());
+    bccAssert(LowerBound->getType() == UpperBound->getType());
 
     llvm::BasicBlock *CondBB, *AfterBB, *HeaderBB;
     llvm::Value *Cond, *IVNext;
     llvm::PHINode *IV;
 
     CondBB = Builder.GetInsertBlock();
-    AfterBB = llvm::SplitBlock(CondBB, Builder.GetInsertPoint(), this);
+    AfterBB = llvm::SplitBlock(CondBB, Builder.GetInsertPoint(), nullptr, nullptr);
     HeaderBB = llvm::BasicBlock::Create(*Context, "Loop", CondBB->getParent());
 
     // if (LowerBound < Upperbound)
@@ -305,11 +389,147 @@ private:
     return AfterBB;
   }
 
+  // Finish building the outgoing argument list for calling a ForEach-able function.
+  //
+  // ArgVector - on input, the non-special arguments
+  //             on output, the non-special arguments combined with the special arguments
+  //               from SpecialArgVector
+  // SpecialArgVector - special arguments (from ExpandSpecialArguments())
+  // SpecialArgContextIdx - return value of ExpandSpecialArguments()
+  //                          (position of context argument in SpecialArgVector)
+  // CalleeFunction - the ForEach-able function being called
+  // Builder - for inserting code into the caller function
+  template<unsigned int ArgVectorLen, unsigned int SpecialArgVectorLen>
+  void finishArgList(      llvm::SmallVector<llvm::Value *, ArgVectorLen>        &ArgVector,
+                     const llvm::SmallVector<llvm::Value *, SpecialArgVectorLen> &SpecialArgVector,
+                     const int SpecialArgContextIdx,
+                     const llvm::Function &CalleeFunction,
+                     llvm::IRBuilder<> &CallerBuilder) {
+    /* The context argument (if any) is a pointer to an opaque user-visible type that differs from
+     * the RsExpandKernelDriverInfoPfx type used in the function we are generating (although the
+     * two types represent the same thing).  Therefore, we must introduce a pointer cast when
+     * generating a call to the kernel function.
+     */
+    const int ArgContextIdx =
+        SpecialArgContextIdx >= 0 ? (ArgVector.size() + SpecialArgContextIdx) : SpecialArgContextIdx;
+    ArgVector.append(SpecialArgVector.begin(), SpecialArgVector.end());
+    if (ArgContextIdx >= 0) {
+      llvm::Type *ContextArgType = nullptr;
+      int ArgIdx = ArgContextIdx;
+      for (const auto &Arg : CalleeFunction.getArgumentList()) {
+        if (!ArgIdx--) {
+          ContextArgType = Arg.getType();
+          break;
+        }
+      }
+      bccAssert(ContextArgType);
+      ArgVector[ArgContextIdx] = CallerBuilder.CreatePointerCast(ArgVector[ArgContextIdx], ContextArgType);
+    }
+  }
+
+  // GEPHelper() returns a SmallVector of values suitable for passing
+  // to IRBuilder::CreateGEP(), and SmallGEPIndices is a typedef for
+  // the returned data type. It is sized so that the SmallVector
+  // returned by GEPHelper() never needs to do a heap allocation for
+  // any list of GEP indices it encounters in the code.
+  typedef llvm::SmallVector<llvm::Value *, 3> SmallGEPIndices;
+
+  // Helper for turning a list of constant integer GEP indices into a
+  // SmallVector of llvm::Value*. The return value is suitable for
+  // passing to a GetElementPtrInst constructor or IRBuilder::CreateGEP().
+  //
+  // Inputs:
+  //   I32Args should be integers which represent the index arguments
+  //   to a GEP instruction.
+  //
+  // Returns:
+  //   Returns a SmallVector of ConstantInts.
+  SmallGEPIndices GEPHelper(std::initializer_list<int32_t> I32Args) {
+    SmallGEPIndices Out(I32Args.size());
+    llvm::IntegerType *I32Ty = llvm::Type::getInt32Ty(*Context);
+    std::transform(I32Args.begin(), I32Args.end(), Out.begin(),
+                   [I32Ty](int32_t Arg) { return llvm::ConstantInt::get(I32Ty, Arg); });
+    return Out;
+  }
+
 public:
-  RSForEachExpandPass(bool pEnableStepOpt)
+  RSForEachExpandPass(bool pEnableStepOpt = true)
       : ModulePass(ID), Module(nullptr), Context(nullptr),
         mEnableStepOpt(pEnableStepOpt) {
 
+  }
+
+  virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override {
+    // This pass does not use any other analysis passes, but it does
+    // add/wrap the existing functions in the module (thus altering the CFG).
+  }
+
+  // Build contribution to outgoing argument list for calling a
+  // ForEach-able function, based on the special parameters of that
+  // function.
+  //
+  // Signature - metadata bits for the signature of the ForEach-able function
+  // X, Arg_p - values derived directly from expanded function,
+  //            suitable for computing arguments for the ForEach-able function
+  // CalleeArgs - contribution is accumulated here
+  // Bump - invoked once for each contributed outgoing argument
+  // LoopHeaderInsertionPoint - an Instruction in the loop header, before which
+  //                            this function can insert loop-invariant loads
+  //
+  // Return value is the (zero-based) position of the context (Arg_p)
+  // argument in the CalleeArgs vector, or a negative value if the
+  // context argument is not placed in the CalleeArgs vector.
+  int ExpandSpecialArguments(uint32_t Signature,
+                             llvm::Value *X,
+                             llvm::Value *Arg_p,
+                             llvm::IRBuilder<> &Builder,
+                             llvm::SmallVector<llvm::Value*, 8> &CalleeArgs,
+                             std::function<void ()> Bump,
+                             llvm::Instruction *LoopHeaderInsertionPoint) {
+
+    bccAssert(CalleeArgs.empty());
+
+    int Return = -1;
+    if (bcinfo::MetadataExtractor::hasForEachSignatureCtxt(Signature)) {
+      CalleeArgs.push_back(Arg_p);
+      Bump();
+      Return = CalleeArgs.size() - 1;
+    }
+
+    if (bcinfo::MetadataExtractor::hasForEachSignatureX(Signature)) {
+      CalleeArgs.push_back(X);
+      Bump();
+    }
+
+    if (bcinfo::MetadataExtractor::hasForEachSignatureY(Signature) ||
+        bcinfo::MetadataExtractor::hasForEachSignatureZ(Signature)) {
+      bccAssert(LoopHeaderInsertionPoint);
+
+      // Y and Z are loop invariant, so they can be hoisted out of the
+      // loop. Set the IRBuilder insertion point to the loop header.
+      auto OldInsertionPoint = Builder.saveIP();
+      Builder.SetInsertPoint(LoopHeaderInsertionPoint);
+
+      if (bcinfo::MetadataExtractor::hasForEachSignatureY(Signature)) {
+        SmallGEPIndices YValueGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldCurrent,
+          RsLaunchDimensionsFieldY}));
+        llvm::Value *YAddr = Builder.CreateInBoundsGEP(Arg_p, YValueGEP, "Y.gep");
+        CalleeArgs.push_back(Builder.CreateLoad(YAddr, "Y"));
+        Bump();
+      }
+
+      if (bcinfo::MetadataExtractor::hasForEachSignatureZ(Signature)) {
+        SmallGEPIndices ZValueGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldCurrent,
+          RsLaunchDimensionsFieldZ}));
+        llvm::Value *ZAddr = Builder.CreateInBoundsGEP(Arg_p, ZValueGEP, "Z.gep");
+        CalleeArgs.push_back(Builder.CreateLoad(ZAddr, "Z"));
+        Bump();
+      }
+
+      Builder.restoreIP(OldInsertionPoint);
+    }
+
+    return Return;
   }
 
   /* Performs the actual optimization on a selected function. On success, the
@@ -334,12 +554,13 @@ public:
     llvm::Function *ExpandedFunction =
       createEmptyExpandedFunction(Function->getName());
 
-    bccAssert(ExpandedFunction->arg_size() == NUM_EXPANDED_FUNCTION_PARAMS);
-
     /*
      * Extract the expanded function's parameters.  It is guaranteed by
      * createEmptyExpandedFunction that there will be five parameters.
      */
+
+    bccAssert(ExpandedFunction->arg_size() == NUM_EXPANDED_FUNCTION_PARAMS);
+
     llvm::Function::arg_iterator ExpandedFunctionArgIter =
       ExpandedFunction->arg_begin();
 
@@ -359,30 +580,20 @@ public:
     llvm::Function::arg_iterator FunctionArgIter = Function->arg_begin();
 
     llvm::Type  *InTy      = nullptr;
-    llvm::Value *InBasePtr = nullptr;
+    llvm::Value *InBufPtr = nullptr;
     if (bcinfo::MetadataExtractor::hasForEachSignatureIn(Signature)) {
-      llvm::Value    *InsMember  = Builder.CreateStructGEP(Arg_p,
-                                                           PARAM_FIELD_INS);
-      llvm::LoadInst *InsBasePtr = Builder.CreateLoad(InsMember, "inputs_base");
-
-      llvm::Value *InStepsMember =
-        Builder.CreateStructGEP(Arg_p, PARAM_FIELD_INESTRIDES);
-      llvm::LoadInst *InStepsBase = Builder.CreateLoad(InStepsMember,
-                                                       "insteps_base");
-
-      llvm::Value *IndexVal = Builder.getInt32(0);
-
-      llvm::Value    *InStepAddr = Builder.CreateGEP(InStepsBase, IndexVal);
-      llvm::LoadInst *InStepArg  = Builder.CreateLoad(InStepAddr,
-                                                      "instep_addr");
+      SmallGEPIndices InStepGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldInStride, 0}));
+      llvm::LoadInst *InStepArg  = Builder.CreateLoad(
+        Builder.CreateInBoundsGEP(Arg_p, InStepGEP, "instep_addr.gep"), "instep_addr");
 
       InTy = (FunctionArgIter++)->getType();
       InStep = getStepValue(&DL, InTy, InStepArg);
 
       InStep->setName("instep");
 
-      llvm::Value *InputAddr = Builder.CreateGEP(InsBasePtr, IndexVal);
-      InBasePtr = Builder.CreateLoad(InputAddr, "input_base");
+      SmallGEPIndices InputAddrGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldInPtr, 0}));
+      InBufPtr = Builder.CreateLoad(
+        Builder.CreateInBoundsGEP(Arg_p, InputAddrGEP, "input_buf.gep"), "input_buf");
     }
 
     llvm::Type *OutTy = nullptr;
@@ -391,34 +602,28 @@ public:
       OutTy = (FunctionArgIter++)->getType();
       OutStep = getStepValue(&DL, OutTy, Arg_outstep);
       OutStep->setName("outstep");
-      OutBasePtr = Builder.CreateLoad(
-                     Builder.CreateStructGEP(Arg_p, PARAM_FIELD_OUT));
+      SmallGEPIndices OutBaseGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldOutPtr, 0}));
+      OutBasePtr = Builder.CreateLoad(Builder.CreateInBoundsGEP(Arg_p, OutBaseGEP, "out_buf.gep"));
     }
 
     llvm::Value *UsrData = nullptr;
     if (bcinfo::MetadataExtractor::hasForEachSignatureUsrData(Signature)) {
       llvm::Type *UsrDataTy = (FunctionArgIter++)->getType();
-      UsrData = Builder.CreatePointerCast(Builder.CreateLoad(
-          Builder.CreateStructGEP(Arg_p, PARAM_FIELD_USR)), UsrDataTy);
+      llvm::Value *UsrDataPointerAddr = Builder.CreateStructGEP(nullptr, Arg_p, RsExpandKernelDriverInfoPfxFieldUsr);
+      UsrData = Builder.CreatePointerCast(Builder.CreateLoad(UsrDataPointerAddr), UsrDataTy);
       UsrData->setName("UsrData");
     }
 
-    if (bcinfo::MetadataExtractor::hasForEachSignatureX(Signature)) {
-      FunctionArgIter++;
-    }
-
-    llvm::Value *Y = nullptr;
-    if (bcinfo::MetadataExtractor::hasForEachSignatureY(Signature)) {
-      Y = Builder.CreateLoad(
-            Builder.CreateStructGEP(Arg_p, PARAM_FIELD_Y), "Y");
-
-      FunctionArgIter++;
-    }
-
-    bccAssert(FunctionArgIter == Function->arg_end());
-
+    llvm::BasicBlock *LoopHeader = Builder.GetInsertBlock();
     llvm::PHINode *IV;
     createLoop(Builder, Arg_x1, Arg_x2, &IV);
+
+    llvm::SmallVector<llvm::Value*, 8> CalleeArgs;
+    const int CalleeArgsContextIdx = ExpandSpecialArguments(Signature, IV, Arg_p, Builder, CalleeArgs,
+                                                            [&FunctionArgIter]() { FunctionArgIter++; },
+                                                            LoopHeader->getTerminator());
+
+    bccAssert(FunctionArgIter == Function->arg_end());
 
     // Populate the actual call to kernel().
     llvm::SmallVector<llvm::Value*, 8> RootArgs;
@@ -437,14 +642,14 @@ public:
     if (OutBasePtr) {
       llvm::Value *OutOffset = Builder.CreateSub(IV, Arg_x1);
       OutOffset = Builder.CreateMul(OutOffset, OutStep);
-      OutPtr = Builder.CreateGEP(OutBasePtr, OutOffset);
+      OutPtr = Builder.CreateInBoundsGEP(OutBasePtr, OutOffset);
       OutPtr = Builder.CreatePointerCast(OutPtr, OutTy);
     }
 
-    if (InBasePtr) {
+    if (InBufPtr) {
       llvm::Value *InOffset = Builder.CreateSub(IV, Arg_x1);
       InOffset = Builder.CreateMul(InOffset, InStep);
-      InPtr = Builder.CreateGEP(InBasePtr, InOffset);
+      InPtr = Builder.CreateInBoundsGEP(InBufPtr, InOffset);
       InPtr = Builder.CreatePointerCast(InPtr, InTy);
     }
 
@@ -460,14 +665,7 @@ public:
       RootArgs.push_back(UsrData);
     }
 
-    llvm::Value *X = IV;
-    if (bcinfo::MetadataExtractor::hasForEachSignatureX(Signature)) {
-      RootArgs.push_back(X);
-    }
-
-    if (Y) {
-      RootArgs.push_back(Y);
-    }
+    finishArgList(RootArgs, CalleeArgs, CalleeArgsContextIdx, *Function, Builder);
 
     Builder.CreateCall(Function, RootArgs);
 
@@ -505,10 +703,14 @@ public:
     llvm::IRBuilder<> Builder(ExpandedFunction->getEntryBlock().begin());
 
     // Create TBAA meta-data.
-    llvm::MDNode *TBAARenderScript, *TBAAAllocation, *TBAAPointer;
+    llvm::MDNode *TBAARenderScriptDistinct, *TBAARenderScript,
+                 *TBAAAllocation, *TBAAPointer;
     llvm::MDBuilder MDHelper(*Context);
 
-    TBAARenderScript = MDHelper.createTBAARoot("RenderScript TBAA");
+    TBAARenderScriptDistinct =
+      MDHelper.createTBAARoot("RenderScript Distinct TBAA");
+    TBAARenderScript = MDHelper.createTBAANode("RenderScript TBAA",
+        TBAARenderScriptDistinct);
     TBAAAllocation = MDHelper.createTBAAScalarTypeNode("allocation",
                                                        TBAARenderScript);
     TBAAAllocation = MDHelper.createTBAAStructTagNode(TBAAAllocation,
@@ -522,19 +724,7 @@ public:
      *
      * Note that we load any loop-invariant arguments before entering the Loop.
      */
-    size_t NumInputs = Function->arg_size();
-
-    llvm::Value *Y = nullptr;
-    if (bcinfo::MetadataExtractor::hasForEachSignatureY(Signature)) {
-      Y = Builder.CreateLoad(
-            Builder.CreateStructGEP(Arg_p, PARAM_FIELD_Y), "Y");
-
-      --NumInputs;
-    }
-
-    if (bcinfo::MetadataExtractor::hasForEachSignatureX(Signature)) {
-      --NumInputs;
-    }
+    size_t NumRemainingInputs = Function->arg_size();
 
     // No usrData parameter on kernels.
     bccAssert(
@@ -543,9 +733,10 @@ public:
     llvm::Function::arg_iterator ArgIter = Function->arg_begin();
 
     // Check the return type
-    llvm::Type     *OutTy      = nullptr;
-    llvm::Value    *OutStep    = nullptr;
-    llvm::LoadInst *OutBasePtr = nullptr;
+    llvm::Type     *OutTy            = nullptr;
+    llvm::Value    *OutStep          = nullptr;
+    llvm::LoadInst *OutBasePtr       = nullptr;
+    llvm::Value    *CastedOutBasePtr = nullptr;
 
     bool PassOutByPointer = false;
 
@@ -557,7 +748,7 @@ public:
         OutTy = ArgIter->getType();
 
         ArgIter++;
-        --NumInputs;
+        --NumRemainingInputs;
       } else {
         // We don't increment Args, since we are using the actual return type.
         OutTy = OutBaseTy->getPointerTo();
@@ -565,99 +756,106 @@ public:
 
       OutStep = getStepValue(&DL, OutTy, Arg_outstep);
       OutStep->setName("outstep");
-      OutBasePtr = Builder.CreateLoad(
-                     Builder.CreateStructGEP(Arg_p, PARAM_FIELD_OUT));
+      SmallGEPIndices OutBaseGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldOutPtr, 0}));
+      OutBasePtr = Builder.CreateLoad(Builder.CreateInBoundsGEP(Arg_p, OutBaseGEP, "out_buf.gep"));
 
       if (gEnableRsTbaa) {
         OutBasePtr->setMetadata("tbaa", TBAAPointer);
       }
+
+      CastedOutBasePtr = Builder.CreatePointerCast(OutBasePtr, OutTy, "casted_out");
     }
 
-    llvm::SmallVector<llvm::Type*,     8> InTypes;
-    llvm::SmallVector<llvm::Value*,    8> InSteps;
-    llvm::SmallVector<llvm::LoadInst*, 8> InBasePtrs;
-    llvm::SmallVector<bool,            8> InIsStructPointer;
+    llvm::SmallVector<llvm::Type*,  8> InTypes;
+    llvm::SmallVector<llvm::Value*, 8> InSteps;
+    llvm::SmallVector<llvm::Value*, 8> InBufPtrs;
+    llvm::SmallVector<llvm::Value*, 8> InStructTempSlots;
 
-    if (NumInputs > 0) {
-      llvm::Value *InsMember = Builder.CreateStructGEP(Arg_p, PARAM_FIELD_INS);
-      llvm::LoadInst *InsBasePtr = Builder.CreateLoad(InsMember, "inputs_base");
+    bccAssert(NumRemainingInputs <= RS_KERNEL_INPUT_LIMIT);
 
-      llvm::Value *InStepsMember =
-        Builder.CreateStructGEP(Arg_p, PARAM_FIELD_INESTRIDES);
-      llvm::LoadInst *InStepsBase = Builder.CreateLoad(InStepsMember,
-                                                         "insteps_base");
-
-      for (size_t InputIndex = 0; InputIndex < NumInputs;
-           ++InputIndex, ArgIter++) {
-
-          llvm::Value *IndexVal = Builder.getInt32(InputIndex);
-
-          llvm::Value    *InStepAddr = Builder.CreateGEP(InStepsBase, IndexVal);
-          llvm::LoadInst *InStepArg  = Builder.CreateLoad(InStepAddr,
-                                                          "instep_addr");
-
-          llvm::Type *InType = ArgIter->getType();
-
-        /*
-         * AArch64 calling dictate that structs of sufficient size get passed by
-         * pointer instead of passed by value.  This, combined with the fact
-         * that we don't allow kernels to operate on pointer data means that if
-         * we see a kernel with a pointer parameter we know that it is struct
-         * input that has been promoted.  As such we don't need to convert its
-         * type to a pointer.  Later we will need to know to avoid a load, so we
-         * save this information in InIsStructPointer.
-         */
-          if (!InType->isPointerTy()) {
-            InType = InType->getPointerTo();
-            InIsStructPointer.push_back(false);
-          } else {
-            InIsStructPointer.push_back(true);
-          }
-
-          llvm::Value *InStep = getStepValue(&DL, InType, InStepArg);
-
-          InStep->setName("instep");
-
-          llvm::Value    *InputAddr = Builder.CreateGEP(InsBasePtr, IndexVal);
-          llvm::LoadInst *InBasePtr = Builder.CreateLoad(InputAddr,
-                                                         "input_base");
-
-          if (gEnableRsTbaa) {
-            InBasePtr->setMetadata("tbaa", TBAAPointer);
-          }
-
-          InTypes.push_back(InType);
-          InSteps.push_back(InStep);
-          InBasePtrs.push_back(InBasePtr);
-      }
-    }
-
+    // Create the loop structure.
+    llvm::BasicBlock *LoopHeader = Builder.GetInsertBlock();
     llvm::PHINode *IV;
     createLoop(Builder, Arg_x1, Arg_x2, &IV);
+
+    llvm::SmallVector<llvm::Value*, 8> CalleeArgs;
+    const int CalleeArgsContextIdx =
+      ExpandSpecialArguments(Signature, IV, Arg_p, Builder, CalleeArgs,
+                             [&NumRemainingInputs]() { --NumRemainingInputs; },
+                             LoopHeader->getTerminator());
+
+    // After ExpandSpecialArguments() gets called, NumRemainingInputs
+    // counts the number of arguments to the kernel that correspond to
+    // an array entry from the InPtr field of the DriverInfo
+    // structure.
+    const size_t NumInPtrArguments = NumRemainingInputs;
+
+    if (NumInPtrArguments > 0) {
+      // Extract information about input slots and step sizes. The work done
+      // here is loop-invariant, so we can hoist the operations out of the loop.
+      auto OldInsertionPoint = Builder.saveIP();
+      Builder.SetInsertPoint(LoopHeader->getTerminator());
+
+      for (size_t InputIndex = 0; InputIndex < NumInPtrArguments; ++InputIndex, ArgIter++) {
+        SmallGEPIndices InStepGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldInStride,
+          static_cast<int32_t>(InputIndex)}));
+        llvm::Value *InStepAddr = Builder.CreateInBoundsGEP(Arg_p, InStepGEP, "instep_addr.gep");
+        llvm::LoadInst *InStepArg = Builder.CreateLoad(InStepAddr, "instep_addr");
+
+        llvm::Type *InType = ArgIter->getType();
+
+        /*
+         * AArch64 calling conventions dictate that structs of sufficient size
+         * get passed by pointer instead of passed by value.  This, combined
+         * with the fact that we don't allow kernels to operate on pointer
+         * data means that if we see a kernel with a pointer parameter we know
+         * that it is a struct input that has been promoted.  As such we don't
+         * need to convert its type to a pointer.  Later we will need to know
+         * to create a temporary copy on the stack, so we save this information
+         * in InStructTempSlots.
+         */
+        if (auto PtrType = llvm::dyn_cast<llvm::PointerType>(InType)) {
+          llvm::Type *ElementType = PtrType->getElementType();
+          InStructTempSlots.push_back(Builder.CreateAlloca(ElementType, nullptr,
+                                                           "input_struct_slot"));
+        } else {
+          InType = InType->getPointerTo();
+          InStructTempSlots.push_back(nullptr);
+        }
+
+        llvm::Value *InStep = getStepValue(&DL, InType, InStepArg);
+
+        InStep->setName("instep");
+
+        SmallGEPIndices InBufPtrGEP(GEPHelper({0, RsExpandKernelDriverInfoPfxFieldInPtr,
+          static_cast<int32_t>(InputIndex)}));
+        llvm::Value    *InBufPtrAddr = Builder.CreateInBoundsGEP(Arg_p, InBufPtrGEP, "input_buf.gep");
+        llvm::LoadInst *InBufPtr = Builder.CreateLoad(InBufPtrAddr, "input_buf");
+        llvm::Value    *CastInBufPtr = Builder.CreatePointerCast(InBufPtr, InType, "casted_in");
+        if (gEnableRsTbaa) {
+          InBufPtr->setMetadata("tbaa", TBAAPointer);
+        }
+
+        InTypes.push_back(InType);
+        InSteps.push_back(InStep);
+        InBufPtrs.push_back(CastInBufPtr);
+      }
+
+      Builder.restoreIP(OldInsertionPoint);
+    }
 
     // Populate the actual call to kernel().
     llvm::SmallVector<llvm::Value*, 8> RootArgs;
 
-    // Calculate the current input and output pointers
-    //
-    //
-    // We always calculate the input/output pointers with a GEP operating on i8
-    // values combined with a multiplication and only cast at the very end to
-    // OutTy.  This is to account for dynamic stepping sizes when the value
-    // isn't apparent at compile time.  In the (very common) case when we know
-    // the step size at compile time, due to haveing complete type information
-    // this multiplication will optmized out and produces code equivalent to a
-    // a GEP on a pointer of the correct type.
+    // Calculate the current input and output pointers.
 
     // Output
 
     llvm::Value *OutPtr = nullptr;
-    if (OutBasePtr) {
+    if (CastedOutBasePtr) {
       llvm::Value *OutOffset = Builder.CreateSub(IV, Arg_x1);
 
-      OutOffset = Builder.CreateMul(OutOffset, OutStep);
-      OutPtr    = Builder.CreateGEP(OutBasePtr, OutOffset);
-      OutPtr    = Builder.CreatePointerCast(OutPtr, OutTy);
+      OutPtr = Builder.CreateInBoundsGEP(CastedOutBasePtr, OutOffset);
 
       if (PassOutByPointer) {
         RootArgs.push_back(OutPtr);
@@ -666,27 +864,29 @@ public:
 
     // Inputs
 
-    if (NumInputs > 0) {
+    if (NumInPtrArguments > 0) {
       llvm::Value *Offset = Builder.CreateSub(IV, Arg_x1);
 
-      for (size_t Index = 0; Index < NumInputs; ++Index) {
-        llvm::Value *InOffset = Builder.CreateMul(Offset, InSteps[Index]);
-        llvm::Value *InPtr    = Builder.CreateGEP(InBasePtrs[Index], InOffset);
-
-        InPtr = Builder.CreatePointerCast(InPtr, InTypes[Index]);
-
+      for (size_t Index = 0; Index < NumInPtrArguments; ++Index) {
+        llvm::Value *InPtr = Builder.CreateInBoundsGEP(InBufPtrs[Index], Offset);
         llvm::Value *Input;
 
-        if (InIsStructPointer[Index]) {
-          Input = InPtr;
+        llvm::LoadInst *InputLoad = Builder.CreateLoad(InPtr, "input");
 
+        if (gEnableRsTbaa) {
+          InputLoad->setMetadata("tbaa", TBAAAllocation);
+        }
+
+        if (llvm::Value *TemporarySlot = InStructTempSlots[Index]) {
+          // Pass a pointer to a temporary on the stack, rather than
+          // passing a pointer to the original value. We do not want
+          // the kernel to potentially modify the input data.
+
+          // Note: don't annotate with TBAA, since the kernel might
+          // have its own TBAA annotations for the pointer argument.
+          Builder.CreateStore(InputLoad, TemporarySlot);
+          Input = TemporarySlot;
         } else {
-          llvm::LoadInst *InputLoad = Builder.CreateLoad(InPtr, "input");
-
-          if (gEnableRsTbaa) {
-            InputLoad->setMetadata("tbaa", TBAAAllocation);
-          }
-
           Input = InputLoad;
         }
 
@@ -694,18 +894,12 @@ public:
       }
     }
 
-    llvm::Value *X = IV;
-    if (bcinfo::MetadataExtractor::hasForEachSignatureX(Signature)) {
-      RootArgs.push_back(X);
-    }
-
-    if (Y) {
-      RootArgs.push_back(Y);
-    }
+    finishArgList(RootArgs, CalleeArgs, CalleeArgsContextIdx, *Function, Builder);
 
     llvm::Value *RetVal = Builder.CreateCall(Function, RootArgs);
 
     if (OutPtr && !PassOutByPointer) {
+      RetVal->setName("call.result");
       llvm::StoreInst *Store = Builder.CreateStore(RetVal, OutPtr);
       if (gEnableRsTbaa) {
         Store->setMetadata("tbaa", TBAAAllocation);
@@ -740,30 +934,32 @@ public:
 
     // Check for library functions that expose a pointer to an Allocation or
     // that are not yet annotated with RenderScript-specific tbaa information.
-    static std::vector<std::string> Funcs;
+    static const std::vector<const char *> Funcs{
+      // rsGetElementAt(...)
+      "_Z14rsGetElementAt13rs_allocationj",
+      "_Z14rsGetElementAt13rs_allocationjj",
+      "_Z14rsGetElementAt13rs_allocationjjj",
 
-    // rsGetElementAt(...)
-    Funcs.push_back("_Z14rsGetElementAt13rs_allocationj");
-    Funcs.push_back("_Z14rsGetElementAt13rs_allocationjj");
-    Funcs.push_back("_Z14rsGetElementAt13rs_allocationjjj");
-    // rsSetElementAt()
-    Funcs.push_back("_Z14rsSetElementAt13rs_allocationPvj");
-    Funcs.push_back("_Z14rsSetElementAt13rs_allocationPvjj");
-    Funcs.push_back("_Z14rsSetElementAt13rs_allocationPvjjj");
-    // rsGetElementAtYuv_uchar_Y()
-    Funcs.push_back("_Z25rsGetElementAtYuv_uchar_Y13rs_allocationjj");
-    // rsGetElementAtYuv_uchar_U()
-    Funcs.push_back("_Z25rsGetElementAtYuv_uchar_U13rs_allocationjj");
-    // rsGetElementAtYuv_uchar_V()
-    Funcs.push_back("_Z25rsGetElementAtYuv_uchar_V13rs_allocationjj");
+      // rsSetElementAt()
+      "_Z14rsSetElementAt13rs_allocationPvj",
+      "_Z14rsSetElementAt13rs_allocationPvjj",
+      "_Z14rsSetElementAt13rs_allocationPvjjj",
 
-    for (std::vector<std::string>::iterator FI = Funcs.begin(),
-                                            FE = Funcs.end();
-         FI != FE; ++FI) {
-      llvm::Function *Function = Module.getFunction(*FI);
+      // rsGetElementAtYuv_uchar_Y()
+      "_Z25rsGetElementAtYuv_uchar_Y13rs_allocationjj",
+
+      // rsGetElementAtYuv_uchar_U()
+      "_Z25rsGetElementAtYuv_uchar_U13rs_allocationjj",
+
+      // rsGetElementAtYuv_uchar_V()
+      "_Z25rsGetElementAtYuv_uchar_V13rs_allocationjj",
+    };
+
+    for (auto FI : Funcs) {
+      llvm::Function *Function = Module.getFunction(FI);
 
       if (!Function) {
-        ALOGE("Missing run-time function '%s'", FI->c_str());
+        ALOGE("Missing run-time function '%s'", FI);
         return true;
       }
 
@@ -779,21 +975,20 @@ public:
   ///
   /// The TBAA metadata used to annotate loads/stores from RenderScript
   /// Allocations is generated in a separate TBAA tree with a
-  /// "RenderScript TBAA" root node. LLVM does assume may-alias for all nodes in
-  /// unrelated alias analysis trees. This function makes the RenderScript TBAA
+  /// "RenderScript Distinct TBAA" root node. LLVM does assume may-alias for
+  /// all nodes in unrelated alias analysis trees. This function makes the
+  /// "RenderScript TBAA" node (which is parented by the Distinct TBAA root),
   /// a subtree of the normal C/C++ TBAA tree aside of normal C/C++ types. With
   /// the connected trees every access to an Allocation is resolved to
   /// must-alias if compared to a normal C/C++ access.
   void connectRenderScriptTBAAMetadata(llvm::Module &Module) {
     llvm::MDBuilder MDHelper(*Context);
-    llvm::MDNode *TBAARenderScript =
-      MDHelper.createTBAARoot("RenderScript TBAA");
-
+    llvm::MDNode *TBAARenderScriptDistinct =
+      MDHelper.createTBAARoot("RenderScript Distinct TBAA");
+    llvm::MDNode *TBAARenderScript = MDHelper.createTBAANode(
+        "RenderScript TBAA", TBAARenderScriptDistinct);
     llvm::MDNode *TBAARoot     = MDHelper.createTBAARoot("Simple C/C++ TBAA");
-    llvm::MDNode *TBAAMergedRS = MDHelper.createTBAANode("RenderScript",
-                                                         TBAARoot);
-
-    TBAARenderScript->replaceAllUsesWith(TBAAMergedRS);
+    TBAARenderScript->replaceOperandWith(1, TBAARoot);
   }
 
   virtual bool runOnModule(llvm::Module &Module) {
@@ -849,6 +1044,7 @@ public:
 } // end anonymous namespace
 
 char RSForEachExpandPass::ID = 0;
+static llvm::RegisterPass<RSForEachExpandPass> X("foreachexp", "ForEach Expand Pass");
 
 namespace bcc {
 

@@ -14,11 +14,21 @@
 # limitations under the License.
 #
 
-# Don't build for unbundled branches
-ifeq (,$(TARGET_BUILD_APPS))
-
 LOCAL_PATH := $(call my-dir)
 LIBBCC_ROOT_PATH := $(LOCAL_PATH)
+
+FORCE_BUILD_LLVM_DISABLE_NDEBUG ?= false
+# Legality check: FORCE_BUILD_LLVM_DISABLE_NDEBUG should consist of one word -- either "true" or "false".
+ifneq "$(words $(FORCE_BUILD_LLVM_DISABLE_NDEBUG))$(words $(filter-out true false,$(FORCE_BUILD_LLVM_DISABLE_NDEBUG)))" "10"
+  $(error FORCE_BUILD_LLVM_DISABLE_NDEBUG may only be true, false, or unset)
+endif
+
+FORCE_BUILD_LLVM_DEBUG ?= false
+# Legality check: FORCE_BUILD_LLVM_DEBUG should consist of one word -- either "true" or "false".
+ifneq "$(words $(FORCE_BUILD_LLVM_DEBUG))$(words $(filter-out true false,$(FORCE_BUILD_LLVM_DEBUG)))" "10"
+  $(error FORCE_BUILD_LLVM_DEBUG may only be true, false, or unset)
+endif
+
 include $(LIBBCC_ROOT_PATH)/libbcc.mk
 
 include frameworks/compile/slang/rs_version.mk
@@ -29,7 +39,6 @@ include frameworks/compile/slang/rs_version.mk
 
 libbcc_WHOLE_STATIC_LIBRARIES += \
   libbccRenderscript \
-  libbccExecutionEngine \
   libbccCore \
   libbccSupport
 
@@ -37,13 +46,6 @@ libbcc_WHOLE_STATIC_LIBRARIES += \
 # Device Shared Library libbcc
 #=====================================================================
 ifneq (true,$(DISABLE_LLVM_DEVICE_BUILDS))
-ifeq ($(TARGET_ARCH),arm64)
-$(info TODOArm64: $(LOCAL_PATH)/Android.mk Enable libbcc build)
-endif
-
-ifeq ($(TARGET_ARCH),mips64)
-$(info TODOMips64: $(LOCAL_PATH)/Android.mk Enable libbcc build)
-endif
 
 ifneq (,)  # skip device variant to avoid contaminating REQUIRED_MODULES
 
@@ -54,8 +56,6 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 
 LOCAL_WHOLE_STATIC_LIBRARIES := $(libbcc_WHOLE_STATIC_LIBRARIES)
-
-LOCAL_WHOLE_STATIC_LIBRARIES += librsloader
 
 LOCAL_SHARED_LIBRARIES := libbcinfo libLLVM libdl libutils libcutils liblog libc++
 
@@ -81,6 +81,9 @@ endif
 # Host Shared Library libbcc
 #=====================================================================
 
+# Don't build for unbundled branches
+ifeq (,$(TARGET_BUILD_APPS))
+
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := libbcc
@@ -94,17 +97,23 @@ endif
 
 LOCAL_WHOLE_STATIC_LIBRARIES += $(libbcc_WHOLE_STATIC_LIBRARIES)
 
-LOCAL_WHOLE_STATIC_LIBRARIES += librsloader
-
 LOCAL_STATIC_LIBRARIES += \
   libutils \
   libcutils \
   liblog
 
-LOCAL_SHARED_LIBRARIES := libbcinfo libLLVM
+LOCAL_SHARED_LIBRARIES := libbcinfo
 
 ifndef USE_MINGW
 LOCAL_LDLIBS := -ldl -lpthread
+endif
+
+include $(LIBBCC_ROOT_PATH)/llvm-loadable-libbcc.mk
+
+ifeq ($(CAN_BUILD_HOST_LLVM_LOADABLE_MODULE),true)
+LOCAL_STATIC_LIBRARIES += libLLVMLinker
+else
+LOCAL_SHARED_LIBRARIES += libLLVM
 endif
 
 include $(LIBBCC_HOST_BUILD_MK)
